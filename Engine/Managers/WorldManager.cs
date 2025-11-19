@@ -164,12 +164,12 @@ public class WorldManager
         var commonTable = new LootTable
         {
             TableId = "common",
-            Items = new List<LootTableEntry>
+            PossibleDrops = new List<LootDrop>
             {
-                new() { ItemName = "Health Potion", Weight = 40, Rarity = 1 },
-                new() { ItemName = "Mana Potion", Weight = 35, Rarity = 1 },
-                new() { ItemName = "Basic Sword", Weight = 15, Rarity = 1 },
-                new() { ItemName = "Leather Armor", Weight = 10, Rarity = 1 }
+                new() { ItemName = "Health Potion", DropChance = 0.40f, Rarity = 1, ItemType = "Consumable" },
+                new() { ItemName = "Mana Potion", DropChance = 0.35f, Rarity = 1, ItemType = "Consumable" },
+                new() { ItemName = "Basic Sword", DropChance = 0.15f, Rarity = 1, ItemType = "Weapon" },
+                new() { ItemName = "Leather Armor", DropChance = 0.10f, Rarity = 1, ItemType = "Armor" }
             }
         };
 
@@ -177,12 +177,12 @@ public class WorldManager
         var rareTable = new LootTable
         {
             TableId = "rare",
-            Items = new List<LootTableEntry>
+            PossibleDrops = new List<LootDrop>
             {
-                new() { ItemName = "Magic Ring", Weight = 30, Rarity = 3 },
-                new() { ItemName = "Enchanted Bow", Weight = 25, Rarity = 3 },
-                new() { ItemName = "Steel Plate", Weight = 25, Rarity = 2 },
-                new() { ItemName = "Speed Boots", Weight = 20, Rarity = 2 }
+                new() { ItemName = "Magic Ring", DropChance = 0.30f, Rarity = 3, ItemType = "Accessory" },
+                new() { ItemName = "Enchanted Bow", DropChance = 0.25f, Rarity = 3, ItemType = "Weapon" },
+                new() { ItemName = "Steel Plate", DropChance = 0.25f, Rarity = 2, ItemType = "Armor" },
+                new() { ItemName = "Speed Boots", DropChance = 0.20f, Rarity = 2, ItemType = "Accessory" }
             }
         };
 

@@ -333,71 +333,53 @@ public class RealTimeGameEngine
 
     public void RemovePlayerFromWorld(string worldId, string playerId)
     {
-        lock (_worldsLock)
+        // ⭐ REFACTORED: Delegate to WorldManager and LobbyManager
+
+        // Try to remove from active world first
+        var world = _worldManager.GetWorld(worldId);
+        if (world != null)
         {
-            if (_worlds.TryGetValue(worldId, out var world))
+            if (_worldManager.RemovePlayerFromWorld(worldId, playerId))
             {
-                if (world.Players.TryRemove(playerId, out var removedPlayer))
+                // Limpiar datos de sistemas especializados
+                _movementSystem.CleanupPlayerTracker(playerId);
+
+                // ⭐ REFACTORED: Use InputProcessor
+                _inputProcessor.ClearPlayerInputBuffer(playerId);
+
+                // Check if world is now empty and cleanup
+                var updatedWorld = _worldManager.GetWorld(worldId);
+                if (updatedWorld != null && updatedWorld.Players.Count == 0)
                 {
-                    // Limpiar datos de sistemas especializados
-                    _movementSystem.CleanupPlayerTracker(playerId);
+                    _mobAISystem.CleanupWorldAI(worldId);
+                    _lootSystem.CleanupWorldLoot(worldId);
+                    _movementSystem.CleanupWorldData(worldId);
 
-                    // ⭐ SYNC: Cleanup input buffer for disconnected player
-                    _inputBuffer.CleanupPlayer(playerId);
-
-                    _logger.LogInformation("Removed player {PlayerName} from active world {WorldId}",
-                        removedPlayer.PlayerName, worldId);
-
-                    if (world.Players.Count == 0)
-                    {
-                        _mobAISystem.CleanupWorldAI(worldId);
-                        _lootSystem.CleanupWorldLoot(worldId);
-                        _movementSystem.CleanupWorldData(worldId);
-
-                        _worlds.Remove(worldId);
-                        _logger.LogInformation("Removed empty world {WorldId}", worldId);
-                    }
+                    _worldManager.RemoveWorld(worldId);
+                    _logger.LogInformation("Removed empty world {WorldId}", worldId);
                 }
-                return;
             }
+            return;
+        }
 
-            if (_worldLobbies.TryGetValue(worldId, out var lobby))
+        // Try to remove from lobby
+        if (_lobbyManager.IsLobby(worldId))
+        {
+            if (_lobbyManager.RemovePlayerFromLobby(worldId, playerId))
             {
-                if (lobby.Players.TryRemove(playerId, out var removedPlayer))
-                {
-                    // Limpiar datos del MovementSystem también para lobbies
-                    _movementSystem.CleanupPlayerTracker(playerId);
+                // Limpiar datos del MovementSystem también para lobbies
+                _movementSystem.CleanupPlayerTracker(playerId);
 
-                    // ⭐ SYNC: Cleanup input buffer for disconnected player
-                    _inputBuffer.CleanupPlayer(playerId);
-
-                    if (lobby.TeamPlayerCounts.TryGetValue(removedPlayer.TeamId, out var teamCount))
-                    {
-                        lobby.TeamPlayerCounts[removedPlayer.TeamId] = Math.Max(0, teamCount - 1);
-                        if (lobby.TeamPlayerCounts[removedPlayer.TeamId] == 0)
-                        {
-                            lobby.TeamPlayerCounts.Remove(removedPlayer.TeamId);
-                        }
-                    }
-                    lobby.TotalPlayers--;
-
-                    _logger.LogInformation("Removed player {PlayerName} from lobby {LobbyId}. Remaining: {Count}",
-                        removedPlayer.PlayerName, worldId, lobby.TotalPlayers);
-                }
+                // ⭐ REFACTORED: Use InputProcessor
+                _inputProcessor.ClearPlayerInputBuffer(playerId);
             }
         }
     }
 
     public List<string> GetAvailableWorlds(int maxPlayersPerWorld)
     {
-        lock (_worldsLock)
-        {
-            return _worldLobbies.Values
-                .Where(l => l.Status == LobbyStatus.WaitingForPlayers)
-                .Where(l => l.TotalPlayers < maxPlayersPerWorld)
-                .Select(l => l.LobbyId)
-                .ToList();
-        }
+        // ⭐ REFACTORED: Delegate to LobbyManager
+        return _lobbyManager.GetAvailableLobbies(maxPlayersPerWorld);
     }
 
     /// <summary>
@@ -409,13 +391,11 @@ public class RealTimeGameEngine
     {
         var updates = new Dictionary<string, WorldUpdateMessage>();
 
-        lock (_worldsLock)
+        // ⭐ REFACTORED: Use WorldManager to get all worlds
+        foreach (var world in _worldManager.GetAllWorlds())
         {
-            foreach (var world in _worlds.Values)
-            {
-                var update = CreateWorldUpdate(world);
-                updates[world.WorldId] = update;
-            }
+            var update = CreateWorldUpdate(world);
+            updates[world.WorldId] = update;
         }
 
         return updates;
@@ -425,12 +405,10 @@ public class RealTimeGameEngine
     {
         var worldStates = new Dictionary<string, WorldStateMessage>();
 
-        lock (_worldsLock)
+        // ⭐ REFACTORED: Use WorldManager to get all worlds
+        foreach (var world in _worldManager.GetAllWorlds())
         {
-            foreach (var world in _worlds.Values)
-            {
-                worldStates[world.WorldId] = CreateWorldStateMessage(world);
-            }
+            worldStates[world.WorldId] = CreateWorldStateMessage(world);
         }
 
         return worldStates;
@@ -438,61 +416,59 @@ public class RealTimeGameEngine
 
     public void ForceCompleteWorld(string worldId)
     {
-        lock (_worldsLock)
+        // ⭐ REFACTORED: Use WorldManager to get world
+        var world = _worldManager.GetWorld(worldId);
+        if (world != null)
         {
-            if (_worlds.TryGetValue(worldId, out var world))
-            {
-                world.IsCompleted = true;
+            world.IsCompleted = true;
 
-                foreach (var extraction in world.ExtractionPoints.Values)
-                {
-                    extraction.IsActive = true;
-                }
-
-                _logger.LogWarning("World {WorldId} forcibly completed by admin", worldId);
-            }
-            else
+            foreach (var extraction in world.ExtractionPoints.Values)
             {
-                throw new InvalidOperationException($"World {worldId} not found");
+                extraction.IsActive = true;
             }
+
+            _logger.LogWarning("World {WorldId} forcibly completed by admin", worldId);
+        }
+        else
+        {
+            throw new InvalidOperationException($"World {worldId} not found");
         }
     }
 
     public Dictionary<string, object> GetServerStats()
     {
-        lock (_worldsLock)
+        // ⭐ REFACTORED: Use managers to get stats
+        var worlds = _worldManager.GetAllWorlds();
+        var totalPlayers = worlds.Sum(w => w.Players.Count);
+        var alivePlayers = worlds.Sum(w => w.Players.Values.Count(p => p.IsAlive));
+        var totalMobs = worlds.Sum(w => w.Mobs.Count);
+        var totalLoot = worlds.Sum(w => w.AvailableLoot.Count);
+
+        // Incluir estadísticas de sistemas especializados
+        var movementStats = _movementSystem.GetDetailedMovementStats();
+        var lootStats = _lootSystem.GetDetailedLootAnalytics();
+        var aiStats = _mobAISystem.GetDetailedAIAnalytics(); // ⭐ NUEVO
+
+        var stats = new Dictionary<string, object>
         {
-            var totalPlayers = _worlds.Values.Sum(w => w.Players.Count);
-            var alivePlayers = _worlds.Values.Sum(w => w.Players.Values.Count(p => p.IsAlive));
-            var totalMobs = _worlds.Values.Sum(w => w.Mobs.Count);
-            var totalLoot = _worlds.Values.Sum(w => w.AvailableLoot.Count);
+            ["FrameNumber"] = _frameNumber,
+            ["WorldCount"] = worlds.Count,
+            ["TotalPlayers"] = totalPlayers,
+            ["AlivePlayers"] = alivePlayers,
+            ["TotalMobs"] = totalMobs,
+            ["TotalLoot"] = totalLoot,
+            ["InputQueueSize"] = _inputProcessor.GetQueueSize(),
+            ["TargetFPS"] = _settings.TargetFPS,
+            ["AveragePlayersPerWorld"] = worlds.Count > 0 ? (double)totalPlayers / worlds.Count : 0,
+            ["CompletedWorlds"] = worlds.Count(w => w.IsCompleted),
+            ["RecentCombatEvents"] = _recentCombatEvents.Values.Sum(list => list.Count),
+            ["RecentLootUpdates"] = _recentLootUpdates.Values.Sum(list => list.Count),
+            ["MovementStats"] = movementStats,
+            ["LootStats"] = lootStats,
+            ["AIStats"] = aiStats // ⭐ NUEVO
+        };
 
-            // Incluir estadísticas de sistemas especializados
-            var movementStats = _movementSystem.GetDetailedMovementStats();
-            var lootStats = _lootSystem.GetDetailedLootAnalytics();
-            var aiStats = _mobAISystem.GetDetailedAIAnalytics(); // ⭐ NUEVO
-
-            var stats = new Dictionary<string, object>
-            {
-                ["FrameNumber"] = _frameNumber,
-                ["WorldCount"] = _worlds.Count,
-                ["TotalPlayers"] = totalPlayers,
-                ["AlivePlayers"] = alivePlayers,
-                ["TotalMobs"] = totalMobs,
-                ["TotalLoot"] = totalLoot,
-                ["InputQueueSize"] = _inputQueue.Count,
-                ["TargetFPS"] = _settings.TargetFPS,
-                ["AveragePlayersPerWorld"] = _worlds.Count > 0 ? (double)totalPlayers / _worlds.Count : 0,
-                ["CompletedWorlds"] = _worlds.Values.Count(w => w.IsCompleted),
-                ["RecentCombatEvents"] = _recentCombatEvents.Values.Sum(list => list.Count),
-                ["RecentLootUpdates"] = _recentLootUpdates.Values.Sum(list => list.Count),
-                ["MovementStats"] = movementStats,
-                ["LootStats"] = lootStats,
-                ["AIStats"] = aiStats // ⭐ NUEVO
-            };
-
-            return stats;
-        }
+        return stats;
     }
 
     // =============================================
@@ -514,11 +490,8 @@ public class RealTimeGameEngine
             ProcessInputQueue();
 
             // ⭐ PERF: Get snapshot of worlds to process (minimal lock time)
-            GameWorld[] worldsSnapshot;
-            lock (_worldsLock)
-            {
-                worldsSnapshot = _worlds.Values.ToArray();
-            }
+            // ⭐ REFACTORED: Use WorldManager to get worlds
+            var worldsSnapshot = _worldManager.GetAllWorlds().ToArray();
 
             // ⭐ PERF: Process worlds in PARALLEL for massive speedup
             // With 8 worlds @ 5ms each: Sequential=40ms, Parallel=5ms (8x faster!)
@@ -1148,10 +1121,11 @@ public class RealTimeGameEngine
         var worldUpdate = pools.WorldUpdates.Rent();
 
         // ⭐ SYNC: Collect acknowledged input sequences for client reconciliation
+        // ⭐ REFACTORED: Use InputProcessor
         var acknowledgedInputs = new Dictionary<string, uint>();
         foreach (var player in world.Players.Values)
         {
-            acknowledgedInputs[player.PlayerId] = _inputBuffer.GetLastAcknowledgedSequence(player.PlayerId);
+            acknowledgedInputs[player.PlayerId] = _inputProcessor.GetLastAcknowledgedSequence(player.PlayerId);
         }
 
         worldUpdate.AcknowledgedInputs = acknowledgedInputs;
