@@ -304,59 +304,11 @@ public class RealTimeGameEngine
         _logger.LogInformation("Initialized mob templates for AI system");
     }
 
-    private void InitializeLootTables()
-    {
-        _baseLootTables["weapon_drops"] = new LootTable
-        {
-            TableId = "weapon_drops",
-            TriggerCondition = "mob_death",
-            PossibleDrops = new List<LootDrop>
-            {
-                new() { ItemName = "Iron Sword", ItemType = "weapon", Rarity = 2, DropChance = 0.15f,
-                       Properties = new() { ["damage"] = 15, ["speed"] = 1.0f } },
-                new() { ItemName = "Steel Dagger", ItemType = "weapon", Rarity = 2, DropChance = 0.12f,
-                       Properties = new() { ["damage"] = 12, ["speed"] = 1.5f } },
-                new() { ItemName = "Battle Axe", ItemType = "weapon", Rarity = 3, DropChance = 0.08f,
-                       Properties = new() { ["damage"] = 25, ["speed"] = 0.8f } },
-                new() { ItemName = "Legendary Blade", ItemType = "weapon", Rarity = 5, DropChance = 0.02f,
-                       Properties = new() { ["damage"] = 40, ["speed"] = 1.2f, ["critical"] = 0.25f } }
-            }
-        };
-
-        _baseLootTables["consumable_drops"] = new LootTable
-        {
-            TableId = "consumable_drops",
-            TriggerCondition = "room_clear",
-            PossibleDrops = new List<LootDrop>
-            {
-                new() { ItemName = "Health Potion", ItemType = "consumable", Rarity = 1, DropChance = 0.3f,
-                       Properties = new() { ["heal"] = 50 } },
-                new() { ItemName = "Mana Potion", ItemType = "consumable", Rarity = 1, DropChance = 0.25f,
-                       Properties = new() { ["mana"] = 75 } },
-                new() { ItemName = "Speed Elixir", ItemType = "consumable", Rarity = 2, DropChance = 0.15f,
-                       Properties = new() { ["speed_boost"] = 1.5f, ["duration"] = 30 } },
-                new() { ItemName = "Strength Potion", ItemType = "consumable", Rarity = 3, DropChance = 0.1f,
-                       Properties = new() { ["strength_boost"] = 5, ["duration"] = 60 } },
-                new() { ItemName = "Invisibility Potion", ItemType = "consumable", Rarity = 4, DropChance = 0.05f,
-                       Properties = new() { ["duration"] = 10 } }
-            }
-        };
-
-        _baseLootTables["key_drops"] = new LootTable
-        {
-            TableId = "key_drops",
-            TriggerCondition = "boss_death",
-            PossibleDrops = new List<LootDrop>
-            {
-                new() { ItemName = "Silver Key", ItemType = "key", Rarity = 3, DropChance = 0.8f },
-                new() { ItemName = "Gold Key", ItemType = "key", Rarity = 4, DropChance = 0.4f },
-                new() { ItemName = "Master Key", ItemType = "key", Rarity = 5, DropChance = 0.1f }
-            }
-        };
-
-        // Inicializar LootSystem con las tablas
-        _lootSystem.InitializeLootTables(_baseLootTables);
-    }
+    // =============================================
+    // ⭐ REMOVED: InitializeLootTables() moved to WorldManager
+    // =============================================
+    // Loot tables are now initialized in WorldManager
+    // and used directly by LootSystem
 
     // =============================================
     // PUBLIC API METHODS (sin cambios)
@@ -373,32 +325,11 @@ public class RealTimeGameEngine
         }
     }
 
-    public string CreateWorld()
-    {
-        var worldId = Guid.NewGuid().ToString();
-        var world = new GameWorld
-        {
-            WorldId = worldId,
-            Rooms = GenerateWorldRooms(),
-            ExtractionPoints = GenerateExtractionPoints(),
-            LootTables = new List<LootTable>(_baseLootTables.Values),
-            CreatedAt = DateTime.UtcNow
-        };
-
-        var spawnedMobs = _mobAISystem.SpawnInitialMobs(world);
-
-        SpawnInitialLoot(world);
-
-        lock (_worldsLock)
-        {
-            _worlds[worldId] = world;
-        }
-
-        _logger.LogInformation("Created new world {WorldId} with {RoomCount} rooms, {MobCount} mobs, {LootCount} loot",
-            worldId, world.Rooms.Count, spawnedMobs.Count, world.AvailableLoot.Count);
-
-        return worldId;
-    }
+    // =============================================
+    // ⭐ REMOVED: CreateWorld() moved to WorldManager
+    // =============================================
+    // This method has been replaced by WorldManager.CreateWorld()
+    // which is called from HandleLobbyReadyToStart()
 
     public void RemovePlayerFromWorld(string worldId, string playerId)
     {
@@ -1196,115 +1127,14 @@ public class RealTimeGameEngine
     }
 
     // =============================================
-    // WORLD GENERATION (sin cambios)
+    // ⭐ REMOVED: World generation methods moved to WorldManager
     // =============================================
-
-    private Dictionary<string, Room> GenerateWorldRooms()
-    {
-        var rooms = new Dictionary<string, Room>();
-        var settings = _settings.WorldGeneration;
-
-        for (int x = 0; x < settings.WorldSizeX; x++)
-        {
-            for (int y = 0; y < settings.WorldSizeY; y++)
-            {
-                var roomId = $"room_{x}_{y}";
-                var room = new Room
-                {
-                    RoomId = roomId,
-                    Position = new Vector2(x * settings.RoomSpacing, y * settings.RoomSpacing),
-                    Size = new Vector2(settings.RoomSizeX, settings.RoomSizeY),
-                    Connections = new List<string>()
-                };
-
-                if (x > 0) room.Connections.Add($"room_{x - 1}_{y}");
-                if (x < settings.WorldSizeX - 1) room.Connections.Add($"room_{x + 1}_{y}");
-                if (y > 0) room.Connections.Add($"room_{x}_{y - 1}");
-                if (y < settings.WorldSizeY - 1) room.Connections.Add($"room_{x}_{y + 1}");
-
-                rooms[roomId] = room;
-            }
-        }
-
-        _logger.LogInformation("Generated {RoomCount} rooms for world", rooms.Count);
-        return rooms;
-    }
-
-    private Dictionary<string, ExtractionPoint> GenerateExtractionPoints()
-    {
-        var extractionPoints = new Dictionary<string, ExtractionPoint>();
-        var settings = _settings.WorldGeneration;
-
-        var cornerPositions = new[]
-        {
-            new { Id = "extract_0_0", Position = new Vector2(0, 0), RoomId = "room_0_0" },
-            new { Id = "extract_3_0", Position = new Vector2((settings.WorldSizeX - 1) * settings.RoomSpacing, 0), RoomId = $"room_{settings.WorldSizeX - 1}_0" },
-            new { Id = "extract_0_3", Position = new Vector2(0, (settings.WorldSizeY - 1) * settings.RoomSpacing), RoomId = $"room_0_{settings.WorldSizeY - 1}" },
-            new { Id = "extract_3_3", Position = new Vector2((settings.WorldSizeX - 1) * settings.RoomSpacing, (settings.WorldSizeY - 1) * settings.RoomSpacing), RoomId = $"room_{settings.WorldSizeX - 1}_{settings.WorldSizeY - 1}" }
-        };
-
-        foreach (var corner in cornerPositions)
-        {
-            extractionPoints[corner.Id] = new ExtractionPoint
-            {
-                ExtractionId = corner.Id,
-                Position = corner.Position,
-                RoomId = corner.RoomId,
-                IsActive = false,
-                ExtractionTimeSeconds = _settings.GameBalance.ExtractionTimeSeconds
-            };
-        }
-
-        return extractionPoints;
-    }
-
-    private void SpawnInitialLoot(GameWorld world)
-    {
-        var settings = _settings.WorldGeneration;
-        var lootCount = settings.InitialLootCount;
-
-        for (int i = 0; i < lootCount; i++)
-        {
-            var room = world.Rooms.Values.ElementAt(_random.Next(world.Rooms.Count));
-            var lootTable = _baseLootTables.Values.ElementAt(_random.Next(_baseLootTables.Count));
-
-            // Usar LootSystem para crear y spawear loot inicial
-            _lootSystem.SpawnLootFromTable(world, room, lootTable);
-        }
-
-        _logger.LogInformation("Spawned initial loot using LootSystem in world {WorldId}", world.WorldId);
-    }
-
-    private bool IsCornerRoom(string roomId)
-    {
-        var settings = _settings.WorldGeneration;
-        var cornerRooms = new[]
-        {
-            "room_0_0",
-            $"room_{settings.WorldSizeX - 1}_0",
-            $"room_0_{settings.WorldSizeY - 1}",
-            $"room_{settings.WorldSizeX - 1}_{settings.WorldSizeY - 1}"
-        };
-
-        return cornerRooms.Contains(roomId);
-    }
-
-    private Vector2 GetTeamSpawnPosition(string teamId)
-    {
-        var settings = _settings.WorldGeneration;
-        var spacing = settings.RoomSpacing;
-        var maxX = (settings.WorldSizeX - 1) * spacing;
-        var maxY = (settings.WorldSizeY - 1) * spacing;
-
-        return teamId.ToLower() switch
-        {
-            "team1" => new Vector2(spacing * 0.2f, spacing * 0.2f),
-            "team2" => new Vector2(maxX - spacing * 0.2f, spacing * 0.2f),
-            "team3" => new Vector2(spacing * 0.2f, maxY - spacing * 0.2f),
-            "team4" => new Vector2(maxX - spacing * 0.2f, maxY - spacing * 0.2f),
-            _ => new Vector2(maxX / 2, maxY / 2)
-        };
-    }
+    // Methods removed:
+    // - GenerateWorldRooms() → WorldManager.GenerateWorldRooms()
+    // - GenerateExtractionPoints() → WorldManager.GenerateExtractionPoints()
+    // - SpawnInitialLoot() → WorldManager.SpawnInitialLoot()
+    // - IsCornerRoom() → WorldManager.IsCornerRoom()
+    // - GetTeamSpawnPosition() → WorldManager.GetTeamSpawnPosition()
 
     // =============================================
     // WORLD UPDATE MESSAGES (⭐ OPTIMIZED WITH OBJECT POOLING)
@@ -1814,10 +1644,12 @@ public class RealTimeGameEngine
         return _lootSystem.GetCurrentLootSettings();
     }
 
+    /// <summary>
+    /// ⭐ REFACTORED: Update loot table (delegated to LootSystem).
+    /// </summary>
     public void UpdateLootTable(string tableId, LootTable lootTable)
     {
         _lootSystem.UpdateLootTable(tableId, lootTable);
-        _baseLootTables[tableId] = lootTable; // Mantener sincronizado
         _logger.LogInformation("Admin updated loot table {TableId}", tableId);
     }
 
