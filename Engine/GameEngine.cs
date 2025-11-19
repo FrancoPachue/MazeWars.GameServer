@@ -564,7 +564,7 @@ public class RealTimeGameEngine
     }
 
     // =============================================
-    // ⭐ REFACTORIZADO: GAME LOOP CON MOB AI SYSTEM
+    // ⭐ OPTIMIZED: GAME LOOP WITH PARALLEL WORLD PROCESSING
     // =============================================
 
     private void GameLoop(object? state)
@@ -581,12 +581,31 @@ public class RealTimeGameEngine
 
             ProcessInputQueue();
 
+            // ⭐ PERF: Get snapshot of worlds to process (minimal lock time)
+            GameWorld[] worldsSnapshot;
             lock (_worldsLock)
             {
-                foreach (var world in _worlds.Values)
+                worldsSnapshot = _worlds.Values.ToArray();
+            }
+
+            // ⭐ PERF: Process worlds in PARALLEL for massive speedup
+            // With 8 worlds @ 5ms each: Sequential=40ms, Parallel=5ms (8x faster!)
+            if (worldsSnapshot.Length > 0)
+            {
+                Parallel.ForEach(worldsSnapshot, new ParallelOptions
                 {
-                    UpdateWorld(world, (float)deltaTime);
-                }
+                    MaxDegreeOfParallelism = Environment.ProcessorCount // Use all CPU cores
+                }, world =>
+                {
+                    try
+                    {
+                        UpdateWorld(world, (float)deltaTime);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error updating world {WorldId}", world.WorldId);
+                    }
+                });
             }
 
             // Optimización periódica de sistemas
