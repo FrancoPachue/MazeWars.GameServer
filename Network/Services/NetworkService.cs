@@ -1,5 +1,6 @@
 ﻿using MazeWars.GameServer.Configuration;
 using MazeWars.GameServer.Engine;
+using MazeWars.GameServer.Engine.Network;
 using MazeWars.GameServer.Models;
 using MazeWars.GameServer.Network.Models;
 using MazeWars.GameServer.Security;
@@ -21,6 +22,7 @@ public class UdpNetworkService : IDisposable
     private readonly GameServerSettings _settings;
     private readonly RealTimeGameEngine _gameEngine;
     private readonly RateLimitingService _rateLimitingService;
+    private readonly SessionManager _sessionManager;
 
     // Network components
     private UdpClient? _udpServer;
@@ -31,6 +33,7 @@ public class UdpNetworkService : IDisposable
     private readonly Timer _networkSendTimer;
     private readonly Timer _clientTimeoutTimer;
     private readonly Timer _reliabilityTimer;
+    private readonly Timer _sessionCleanupTimer;
 
     // State tracking
     private bool _isRunning = false;
@@ -47,12 +50,14 @@ public class UdpNetworkService : IDisposable
         ILogger<UdpNetworkService> logger,
         IOptions<GameServerSettings> settings,
         RealTimeGameEngine gameEngine,
-        RateLimitingService rateLimitingService)
+        RateLimitingService rateLimitingService,
+        SessionManager sessionManager)
     {
         _logger = logger;
         _settings = settings.Value;
         _gameEngine = gameEngine;
         _rateLimitingService = rateLimitingService;
+        _sessionManager = sessionManager;
 
         // Timer para enviar updates a 30 FPS (reduced from 60)
         var sendIntervalMs = 1000.0 / 30;
@@ -67,6 +72,10 @@ public class UdpNetworkService : IDisposable
         // Timer para retry de mensajes confiables (cada segundo)
         _reliabilityTimer = new Timer(ProcessReliableMessages, null,
             TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+
+        // ⭐ RECONNECTION: Timer para cleanup de sesiones expiradas (cada 30 segundos)
+        _sessionCleanupTimer = new Timer(CleanupExpiredSessions, null,
+            TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
 
         _gameEngine.OnGameStarted += HandleGameStarted;
     }

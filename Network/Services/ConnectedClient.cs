@@ -17,4 +17,7 @@ public class ConnectedClient
     public DateTime ConnectedAt { get; set; } = DateTime.UtcNow;
     public int MessagesSent { get; set; } = 0;
     public int MessagesReceived { get; set; } = 0;
+
+    // ⭐ RECONNECTION: Session token for reconnection handling
+    public string SessionToken { get; set; } = string.Empty;
 }
