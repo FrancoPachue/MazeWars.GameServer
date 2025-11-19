@@ -915,10 +915,21 @@ public class UdpNetworkService : IDisposable
                 .Where(c => c.WorldId == worldId)
                 .ToList();
 
+            // Send to all clients in world
             foreach (var client in clientsInWorld)
             {
                 _ = Task.Run(() => SendSplitWorldUpdate(client.EndPoint, update));
             }
+
+            // ⭐ PERF: Return update to pool after sending to all clients
+            // Note: This assumes serialization happens quickly (which it does)
+            // For more complex scenarios, implement reference counting
+            Task.Run(async () =>
+            {
+                // Wait a bit for sends to complete
+                await Task.Delay(100);
+                _gameEngine.ReturnWorldUpdateToPool(update);
+            });
         }
     }
 

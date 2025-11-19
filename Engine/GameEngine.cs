@@ -6,6 +6,7 @@ using MazeWars.GameServer.Engine.Movement.Settings;
 using MazeWars.GameServer.Engine.AI.Interface;
 using MazeWars.GameServer.Engine.Loot.Interface;
 using MazeWars.GameServer.Engine.Network;
+using MazeWars.GameServer.Engine.Memory;
 using MazeWars.GameServer.Models;
 using MazeWars.GameServer.Network;
 using MazeWars.GameServer.Network.Models;
@@ -467,6 +468,11 @@ public class RealTimeGameEngine
         }
     }
 
+    /// <summary>
+    /// Get world updates for all active worlds.
+    /// ⚠️ IMPORTANT: Caller MUST call ReturnWorldUpdateToPool() after serialization to prevent memory leaks!
+    /// </summary>
+    /// <returns>Dictionary of world updates (uses object pooling)</returns>
     public Dictionary<string, WorldUpdateMessage> GetWorldUpdates()
     {
         var updates = new Dictionary<string, WorldUpdateMessage>();
@@ -1348,12 +1354,15 @@ public class RealTimeGameEngine
     }
 
     // =============================================
-    // WORLD UPDATE MESSAGES (sin cambios)
+    // WORLD UPDATE MESSAGES (⭐ OPTIMIZED WITH OBJECT POOLING)
     // =============================================
 
     private WorldUpdateMessage CreateWorldUpdate(GameWorld world)
     {
-        var dirtyMobs = world.Mobs.Values.Where(m => m.IsDirty).ToList();
+        var pools = NetworkObjectPools.Instance;
+
+        // ⭐ PERF: Rent world update from pool
+        var worldUpdate = pools.WorldUpdates.Rent();
 
         // ⭐ SYNC: Collect acknowledged input sequences for client reconciliation
         var acknowledgedInputs = new Dictionary<string, uint>();
@@ -1362,46 +1371,94 @@ public class RealTimeGameEngine
             acknowledgedInputs[player.PlayerId] = _inputBuffer.GetLastAcknowledgedSequence(player.PlayerId);
         }
 
-        var worldUpdate = new WorldUpdateMessage
+        worldUpdate.AcknowledgedInputs = acknowledgedInputs;
+        worldUpdate.ServerTime = (float)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds;
+        worldUpdate.FrameNumber = _frameNumber;
+
+        // ⭐ PERF: Rent lists from pools (pre-sized for efficiency)
+        var playerList = pools.PlayerStateLists.Rent();
+        var mobList = pools.MobUpdateLists.Rent();
+
+        // Create player updates using pooled objects
+        foreach (var p in world.Players.Values)
         {
-            // ⭐ SYNC: Critical synchronization data
-            AcknowledgedInputs = acknowledgedInputs,
-            ServerTime = (float)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds,
+            var playerUpdate = pools.PlayerStateUpdates.Rent();
+            playerUpdate.PlayerId = p.PlayerId;
+            playerUpdate.Position = p.Position;
+            playerUpdate.Velocity = p.Velocity;
+            playerUpdate.Direction = p.Direction;
+            playerUpdate.Health = p.Health;
+            playerUpdate.MaxHealth = p.MaxHealth;
+            playerUpdate.IsAlive = p.IsAlive;
+            playerUpdate.IsMoving = p.IsMoving;
+            playerUpdate.IsCasting = p.IsCasting;
 
-            // Frame counter
-            FrameNumber = _frameNumber,
-
-            // Game state updates
-            Players = world.Players.Values.Select(p => new PlayerStateUpdate
-            {
-                PlayerId = p.PlayerId,
-                Position = p.Position,
-                Velocity = p.Velocity,
-                Direction = p.Direction,
-                Health = p.Health,
-                MaxHealth = p.MaxHealth,
-                IsAlive = p.IsAlive,
-                IsMoving = p.IsMoving,
-                IsCasting = p.IsCasting
-            }).ToList(),
-
-            CombatEvents = GetAndClearRecentCombatEvents(world.WorldId),
-            LootUpdates = GetAndClearRecentLootUpdates(world.WorldId),
-            MobUpdates = dirtyMobs.Select(m => new MobUpdate
-            {
-                MobId = m.MobId,
-                Position = m.Position,
-                State = m.State,
-                Health = m.Health
-            }).ToList()
-        };
-
-        foreach (var mob in dirtyMobs)
-        {
-            mob.IsDirty = false;
+            playerList.Add(playerUpdate);
         }
 
+        // Create mob updates using pooled objects (only dirty mobs)
+        foreach (var m in world.Mobs.Values)
+        {
+            if (!m.IsDirty) continue;
+
+            var mobUpdate = pools.MobUpdates.Rent();
+            mobUpdate.MobId = m.MobId;
+            mobUpdate.Position = m.Position;
+            mobUpdate.State = m.State;
+            mobUpdate.Health = m.Health;
+
+            mobList.Add(mobUpdate);
+            m.IsDirty = false; // Clear dirty flag
+        }
+
+        worldUpdate.Players = playerList;
+        worldUpdate.MobUpdates = mobList;
+        worldUpdate.CombatEvents = GetAndClearRecentCombatEvents(world.WorldId);
+        worldUpdate.LootUpdates = GetAndClearRecentLootUpdates(world.WorldId);
+
+        // ⚠️ IMPORTANT: Objects will be returned to pool after serialization
+        // See ReturnWorldUpdateToPool() method
+
         return worldUpdate;
+    }
+
+    /// <summary>
+    /// Return world update and all its contents back to pools after serialization
+    /// </summary>
+    public void ReturnWorldUpdateToPool(WorldUpdateMessage worldUpdate)
+    {
+        var pools = NetworkObjectPools.Instance;
+
+        // Return player updates to pool
+        if (worldUpdate.Players != null)
+        {
+            pools.PlayerStateUpdates.ReturnRange(worldUpdate.Players);
+            pools.PlayerStateLists.Return(worldUpdate.Players);
+        }
+
+        // Return mob updates to pool
+        if (worldUpdate.MobUpdates != null)
+        {
+            pools.MobUpdates.ReturnRange(worldUpdate.MobUpdates);
+            pools.MobUpdateLists.Return(worldUpdate.MobUpdates);
+        }
+
+        // Return combat events to pool
+        if (worldUpdate.CombatEvents != null)
+        {
+            pools.CombatEvents.ReturnRange(worldUpdate.CombatEvents);
+            pools.CombatEventLists.Return(worldUpdate.CombatEvents);
+        }
+
+        // Return loot updates to pool
+        if (worldUpdate.LootUpdates != null)
+        {
+            pools.LootUpdates.ReturnRange(worldUpdate.LootUpdates);
+            pools.LootUpdateLists.Return(worldUpdate.LootUpdates);
+        }
+
+        // Return world update itself to pool
+        pools.WorldUpdates.Return(worldUpdate);
     }
 
     private WorldStateMessage CreateWorldStateMessage(GameWorld world)
@@ -1798,6 +1855,22 @@ public class RealTimeGameEngine
                 ["AveragePlayersPerLobby"] = totalLobbies > 0 ? (double)totalLobbyPlayers / totalLobbies : 0
             };
         }
+    }
+
+    /// <summary>
+    /// Get object pool statistics for monitoring performance
+    /// </summary>
+    public Dictionary<string, PoolStats> GetPoolStats()
+    {
+        return NetworkObjectPools.Instance.GetAllStats();
+    }
+
+    /// <summary>
+    /// Get total allocations saved by object pooling
+    /// </summary>
+    public long GetTotalAllocationsSaved()
+    {
+        return NetworkObjectPools.Instance.GetTotalAllocationsSaved();
     }
 
     // =============================================
