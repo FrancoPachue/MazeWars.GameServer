@@ -350,9 +350,7 @@ public class UdpNetworkService : IDisposable
                     await HandleExtraction(clientEndPoint, networkMessage);
                     break;
 
-                case "trade_request":
-                    await HandleTradeRequest(clientEndPoint, networkMessage);
-                    break;
+                // REMOVED: trade_request (incomplete feature - add in future version)
 
                 case "ping":
                     await HandlePing(clientEndPoint, networkMessage);
@@ -1026,31 +1024,7 @@ public class UdpNetworkService : IDisposable
         }
     }
 
-    private async Task HandleTradeRequest(IPEndPoint clientEndPoint, NetworkMessage message)
-    {
-        if (!_connectedClients.TryGetValue(clientEndPoint, out var client))
-            return;
-
-        try
-        {
-            var tradeData = JsonConvert.DeserializeObject<TradeRequestMessage>(message.Data.ToString()!);
-            if (tradeData == null || string.IsNullOrWhiteSpace(tradeData.TargetPlayerId))
-            {
-                await SendErrorToClient(clientEndPoint, "Invalid trade request data");
-                return;
-            }
-
-            message.PlayerId = client.Player.PlayerId;
-            message.Data = tradeData;
-            _gameEngine.QueueInput(message);
-
-            client.LastActivity = DateTime.UtcNow;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error processing trade request from {PlayerId}", client.Player.PlayerId);
-        }
-    }
+    // REMOVED: HandleTradeRequest (incomplete feature - will implement in future version)
 
     private async Task HandlePing(IPEndPoint clientEndPoint, NetworkMessage message)
     {
