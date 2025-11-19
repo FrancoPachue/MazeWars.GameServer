@@ -106,8 +106,9 @@ public class SessionManager
             {
                 EffectType = effect.EffectType,
                 Value = effect.Value,
-                Duration = effect.Duration,
-                AppliedAt = effect.AppliedAt
+                AppliedAt = effect.AppliedAt,
+                ExpiresAt = effect.AppliedAt.AddSeconds(effect.Duration),
+                SourcePlayerId = effect.SourcePlayerId
             }).ToList(),
 
             SavedAt = DateTime.UtcNow
