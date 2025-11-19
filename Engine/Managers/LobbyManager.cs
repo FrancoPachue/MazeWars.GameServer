@@ -188,8 +188,8 @@ public class LobbyManager
             if (!lobby.Players.TryGetValue(playerId, out var player))
                 return false;
 
-            // Remove player
-            lobby.Players.Remove(playerId);
+            // Remove player (ConcurrentDictionary uses TryRemove)
+            lobby.Players.TryRemove(playerId, out _);
             lobby.TotalPlayers--;
 
             if (lobby.TeamPlayerCounts.TryGetValue(player.TeamId, out var teamCount))

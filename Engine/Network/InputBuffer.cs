@@ -226,7 +226,9 @@ public class InputBuffer
     /// </summary>
     public uint GetLastAcknowledgedSequence(string playerId)
     {
-        return _lastProcessedSequence.GetValueOrDefault(playerId, 0);
+        if (_lastProcessedSequence.TryGetValue(playerId, out var sequence))
+            return sequence;
+        return 0;
     }
 
     /// <summary>
