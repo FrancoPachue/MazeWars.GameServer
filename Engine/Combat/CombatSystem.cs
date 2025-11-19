@@ -320,6 +320,9 @@ public class CombatSystem : ICombatSystem
         deadPlayer.Health = 0;
         deadPlayer.DeathTime = DateTime.UtcNow;
 
+        // ⭐ DELTA COMPRESSION: Force update for death (critical state change)
+        deadPlayer.ForceNextUpdate();
+
         var killerName = killer?.PlayerName ?? "Environment";
         _logger.LogInformation("Player {DeadPlayer} was killed by {Killer}",
             deadPlayer.PlayerName, killerName);

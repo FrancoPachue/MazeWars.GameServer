@@ -1,9 +1,27 @@
-﻿namespace MazeWars.GameServer.Models;
+﻿using MessagePack;
 
+namespace MazeWars.GameServer.Models;
+
+[MessagePackObject]
 public struct Vector2
 {
+    [Key(0)]
     public float X { get; set; }
+
+    [Key(1)]
     public float Y { get; set; }
+
+    [IgnoreMember]
+    public static Vector2 Zero => new(0, 0);
+
+    [IgnoreMember]
+    public static Vector2 One => new(1, 1);
+
+    [IgnoreMember]
+    public static Vector2 UnitX => new(1, 0);
+
+    [IgnoreMember]
+    public static Vector2 UnitY => new(0, 1);
 
 
     public Vector2(float x, float y)
@@ -11,12 +29,6 @@ public struct Vector2
         X = x;
         Y = y;
     }
-
-
-    public static Vector2 Zero => new(0, 0);
-    public static Vector2 One => new(1, 1);
-    public static Vector2 UnitX => new(1, 0);
-    public static Vector2 UnitY => new(0, 1);
 
 
     public static Vector2 operator +(Vector2 a, Vector2 b) => new(a.X + b.X, a.Y + b.Y);

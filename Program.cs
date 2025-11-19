@@ -15,6 +15,8 @@ using MazeWars.GameServer.Engine.Movement.Interface;
 using MazeWars.GameServer.Services.Movement;
 using MazeWars.GameServer.Engine.AI.Interface;
 using MazeWars.GameServer.Services.AI;
+using MazeWars.GameServer.Engine.Network;
+using MazeWars.GameServer.Engine.Managers;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -102,6 +104,12 @@ try
     builder.Services.AddSingleton<ILootSystem,LootSystem>();
 
     builder.Services.AddSingleton<IMobAISystem, MobAISystem>();
+
+    // ⭐ REFACTORED: Managers (Singleton - separated concerns for better maintainability)
+    builder.Services.AddSingleton<LobbyManager>();       // Lobby lifecycle & matchmaking
+    builder.Services.AddSingleton<WorldManager>();       // World generation & management
+    builder.Services.AddSingleton<InputProcessor>();     // Input queue & UDP packet ordering
+
     // Game Engine (Singleton - maintains game state)
     builder.Services.AddSingleton<RealTimeGameEngine>();
 
@@ -110,6 +118,14 @@ try
 
     // Security Services
     builder.Services.AddSingleton<RateLimitingService>();
+
+    // ⭐ RECONNECTION: Session Manager (Singleton - manages player reconnection sessions)
+    builder.Services.AddSingleton(sp =>
+    {
+        var logger = sp.GetRequiredService<ILogger<SessionManager>>();
+        // Default 5 minute TTL for reconnection
+        return new SessionManager(logger, TimeSpan.FromMinutes(5));
+    });
 
     // System Metrics (choose implementation based on platform)
     builder.Services.AddSingleton<ISystemMetrics, SystemMetrics>();
