@@ -1447,7 +1447,7 @@ private RealTimePlayer CreateEnhancedPlayer(ClientConnectData connectData, IPEnd
         _ => new { Health = 100, Mana = 100, Speed = 5.0f, Strength = 10, Agility = 10, Intelligence = 10 }
     };
 
-    return new RealTimePlayer
+    var player = new RealTimePlayer
     {
         PlayerId = Guid.NewGuid().ToString(),
         PlayerName = connectData.PlayerName,
@@ -1476,6 +1476,11 @@ private RealTimePlayer CreateEnhancedPlayer(ClientConnectData connectData, IPEnd
         MovementSpeedModifier = 1.0f,
         DamageReduction = 0.0f
     };
+
+    // ⭐ DELTA COMPRESSION: Force first update for new player
+    player.ForceNextUpdate();
+
+    return player;
 }
 
 private Vector2 GetSpawnPosition(string teamId)
