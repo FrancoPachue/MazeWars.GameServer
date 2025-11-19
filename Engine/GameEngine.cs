@@ -1336,23 +1336,21 @@ public class RealTimeGameEngine
 
     public bool AddPlayerToWorld(string worldId, RealTimePlayer player)
     {
-        lock (_worldsLock)
+        // ⭐ REFACTORED: Use WorldManager to check for active world
+        var existingWorld = _worldManager.GetWorld(worldId);
+        if (existingWorld != null)
         {
-            // Check if it's an active world
-            if (_worlds.TryGetValue(worldId, out var existingWorld))
-            {
-                return AddPlayerToExistingWorld(existingWorld, player);
-            }
-
-            // ⭐ REFACTORED: Delegate to LobbyManager for lobby joins
-            if (_lobbyManager.IsLobby(worldId))
-            {
-                return _lobbyManager.AddPlayerToLobby(worldId, player);
-            }
-
-            _logger.LogWarning("Attempted to add player to non-existent world/lobby {WorldId}", worldId);
-            return false;
+            return AddPlayerToExistingWorld(existingWorld, player);
         }
+
+        // ⭐ REFACTORED: Delegate to LobbyManager for lobby joins
+        if (_lobbyManager.IsLobby(worldId))
+        {
+            return _lobbyManager.AddPlayerToLobby(worldId, player);
+        }
+
+        _logger.LogWarning("Attempted to add player to non-existent world/lobby {WorldId}", worldId);
+        return false;
     }
 
     /// <summary>
@@ -1500,22 +1498,21 @@ public class RealTimeGameEngine
 
     private void LogPerformanceStats()
     {
-        lock (_worldsLock)
-        {
-            var totalPlayers = _worlds.Values.Sum(w => w.Players.Count);
-            var totalMobs = _worlds.Values.Sum(w => w.Mobs.Count);
-            var totalLoot = _worlds.Values.Sum(w => w.AvailableLoot.Count);
+        // ⭐ REFACTORED: Use managers to get stats
+        var worlds = _worldManager.GetAllWorlds();
+        var totalPlayers = worlds.Sum(w => w.Players.Count);
+        var totalMobs = worlds.Sum(w => w.Mobs.Count);
+        var totalLoot = worlds.Sum(w => w.AvailableLoot.Count);
 
-            var movementStats = _movementSystem.GetDetailedMovementStats();
-            var lootStats = _lootSystem.GetDetailedLootAnalytics();
-            var aiStats = _mobAISystem.GetDetailedAIAnalytics(); // ⭐ NUEVO
-            var suspiciousPlayers = _movementSystem.GetSuspiciousPlayers().Count;
+        var movementStats = _movementSystem.GetDetailedMovementStats();
+        var lootStats = _lootSystem.GetDetailedLootAnalytics();
+        var aiStats = _mobAISystem.GetDetailedAIAnalytics(); // ⭐ NUEVO
+        var suspiciousPlayers = _movementSystem.GetSuspiciousPlayers().Count;
 
-            _logger.LogInformation("Performance Stats - Frame: {Frame}, Worlds: {Worlds}, Players: {Players}, Mobs: {Mobs}, Loot: {Loot}, Queue: {Queue}, Movement: Collisions={Collisions}, Suspicious={Suspicious}, LootPickupRate={PickupRate:F2}, AIEfficiency={AIEfficiency:F2}",
-                _frameNumber, _worlds.Count, totalPlayers, totalMobs, totalLoot, _inputQueue.Count,
-                movementStats.GetValueOrDefault("TotalCollisions", 0), suspiciousPlayers,
-                lootStats.GetValueOrDefault("PickupRate", 0.0), aiStats.GetValueOrDefault("ProcessingEfficiency", 0.0));
-        }
+        _logger.LogInformation("Performance Stats - Frame: {Frame}, Worlds: {Worlds}, Players: {Players}, Mobs: {Mobs}, Loot: {Loot}, Queue: {Queue}, Movement: Collisions={Collisions}, Suspicious={Suspicious}, LootPickupRate={PickupRate:F2}, AIEfficiency={AIEfficiency:F2}",
+            _frameNumber, worlds.Count, totalPlayers, totalMobs, totalLoot, _inputProcessor.GetQueueSize(),
+            movementStats.GetValueOrDefault("TotalCollisions", 0), suspiciousPlayers,
+            lootStats.GetValueOrDefault("PickupRate", 0.0), aiStats.GetValueOrDefault("ProcessingEfficiency", 0.0));
     }
 
     /// <summary>
@@ -1755,24 +1752,21 @@ public class RealTimeGameEngine
             _combatSystem.OnPlayerDeath -= HandlePlayerDeath;
         }
 
-        lock (_worldsLock)
+        // ⭐ REFACTORED: Use WorldManager and LobbyManager for cleanup
+        var allWorlds = _worldManager.GetAllWorlds();
+        foreach (var world in allWorlds)
         {
-            // Limpiar datos de sistemas especializados para todos los mundos
-            foreach (var worldId in _worlds.Keys)
-            {
-                _mobAISystem?.CleanupWorldAI(worldId); // ⭐ NUEVO
-                _lootSystem?.CleanupWorldLoot(worldId);
-                _movementSystem?.CleanupWorldData(worldId);
-            }
-
-            _worlds.Clear();
-            _worldLobbies.Clear();
+            _mobAISystem?.CleanupWorldAI(world.WorldId); // ⭐ NUEVO
+            _lootSystem?.CleanupWorldLoot(world.WorldId);
+            _movementSystem?.CleanupWorldData(world.WorldId);
         }
+
+        // ⭐ REFACTORED: Dispose managers
+        _worldManager?.Dispose();
+        _inputProcessor?.Dispose();
 
         _recentCombatEvents.Clear();
         _recentLootUpdates.Clear();
-
-        while (_inputQueue.TryDequeue(out _)) { }
 
         _logger.LogInformation("RealTimeGameEngine disposed with Combat, Movement, Loot, and AI systems");
     }

@@ -730,8 +730,9 @@ public class UdpNetworkService : IDisposable
             {
                 EffectType = effect.EffectType,
                 Value = effect.Value,
-                Duration = effect.Duration,
-                AppliedAt = effect.AppliedAt
+                AppliedAt = effect.AppliedAt,
+                ExpiresAt = effect.AppliedAt.AddSeconds(effect.Duration),
+                SourcePlayerId = effect.SourcePlayerId
             }).ToList(),
 
             // Reset network/activity fields
