@@ -15,6 +15,7 @@ using MazeWars.GameServer.Engine.Movement.Interface;
 using MazeWars.GameServer.Services.Movement;
 using MazeWars.GameServer.Engine.AI.Interface;
 using MazeWars.GameServer.Services.AI;
+using MazeWars.GameServer.Engine.Network;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -110,6 +111,14 @@ try
 
     // Security Services
     builder.Services.AddSingleton<RateLimitingService>();
+
+    // ⭐ RECONNECTION: Session Manager (Singleton - manages player reconnection sessions)
+    builder.Services.AddSingleton(sp =>
+    {
+        var logger = sp.GetRequiredService<ILogger<SessionManager>>();
+        // Default 5 minute TTL for reconnection
+        return new SessionManager(logger, TimeSpan.FromMinutes(5));
+    });
 
     // System Metrics (choose implementation based on platform)
     builder.Services.AddSingleton<ISystemMetrics, SystemMetrics>();

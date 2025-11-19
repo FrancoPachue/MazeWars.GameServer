@@ -326,6 +326,10 @@ public class UdpNetworkService : IDisposable
                     await HandleClientConnect(clientEndPoint, networkMessage);
                     break;
 
+                case "reconnect":
+                    await HandleClientReconnect(clientEndPoint, networkMessage);
+                    break;
+
                 case "player_input":
                     await HandlePlayerInput(clientEndPoint, networkMessage);
                     break;
@@ -476,22 +480,27 @@ public class UdpNetworkService : IDisposable
                 return;
             }
 
+            // ⭐ RECONNECTION: Create session for player
+            var isInLobby = IsLobby(worldId);
+            var sessionToken = _sessionManager.CreateSession(player, worldId, isInLobby);
+
             // Add to connected clients
             var connectedClient = new ConnectedClient
             {
                 EndPoint = clientEndPoint,
                 Player = player,
                 WorldId = worldId,
-                LastActivity = DateTime.UtcNow
+                LastActivity = DateTime.UtcNow,
+                SessionToken = sessionToken
             };
 
             _connectedClients[clientEndPoint] = connectedClient;
 
-            _logger.LogInformation("Player '{PlayerName}' ({Class}) connected to world {WorldId} on team {TeamId}",
-                player.PlayerName, player.PlayerClass, worldId, player.TeamId);
+            _logger.LogInformation("Player '{PlayerName}' ({Class}) connected to world {WorldId} on team {TeamId} [Session: {SessionToken}]",
+                player.PlayerName, player.PlayerClass, worldId, player.TeamId, sessionToken.Substring(0, 8) + "...");
 
-            // NUEVO: Enviar respuesta de conexión con información de lobby/mundo
-            await SendConnectionResponse(clientEndPoint, player, worldId);
+            // NUEVO: Enviar respuesta de conexión con información de lobby/mundo y session token
+            await SendConnectionResponse(clientEndPoint, player, worldId, sessionToken);
 
             // Notify other players in the world/lobby
             BroadcastToWorld(worldId, new NetworkMessage
@@ -515,7 +524,231 @@ public class UdpNetworkService : IDisposable
         }
     }
 
-    private async Task SendConnectionResponse(IPEndPoint clientEndPoint, RealTimePlayer player, string worldId)
+    /// <summary>
+    /// ⭐ RECONNECTION: Handle client reconnection using session token
+    /// </summary>
+    private async Task HandleClientReconnect(IPEndPoint clientEndPoint, NetworkMessage message)
+    {
+        try
+        {
+            var reconnectData = JsonConvert.DeserializeObject<ReconnectRequestData>(message.Data.ToString()!);
+            if (reconnectData == null)
+            {
+                await SendErrorToClient(clientEndPoint, "Invalid reconnect data");
+                return;
+            }
+
+            _logger.LogInformation("Reconnection attempt from {EndPoint} with session {SessionToken}",
+                clientEndPoint, reconnectData.SessionToken.Substring(0, 8) + "...");
+
+            // Validate reconnection
+            var (success, session, errorMessage) = _sessionManager.ValidateReconnection(reconnectData.SessionToken);
+
+            if (!success || session == null)
+            {
+                _logger.LogWarning("Reconnection failed for {EndPoint}: {Error}", clientEndPoint, errorMessage);
+                await SendAsync(clientEndPoint, new NetworkMessage
+                {
+                    Type = "reconnect_response",
+                    PlayerId = "",
+                    Data = new ReconnectResponseData
+                    {
+                        Success = false,
+                        ErrorMessage = errorMessage
+                    }
+                });
+                return;
+            }
+
+            // Verify player name matches
+            if (!session.PlayerName.Equals(reconnectData.PlayerName, StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning("Reconnection failed: player name mismatch. Expected {Expected}, got {Got}",
+                    session.PlayerName, reconnectData.PlayerName);
+                await SendAsync(clientEndPoint, new NetworkMessage
+                {
+                    Type = "reconnect_response",
+                    PlayerId = "",
+                    Data = new ReconnectResponseData
+                    {
+                        Success = false,
+                        ErrorMessage = "Player name does not match session"
+                    }
+                });
+                return;
+            }
+
+            // Restore player from saved state
+            var restoredPlayer = RestorePlayerFromSession(session, clientEndPoint);
+
+            // Add player back to the world
+            if (!_gameEngine.AddPlayerToWorld(session.WorldId, restoredPlayer))
+            {
+                _logger.LogError("Failed to add reconnected player {PlayerName} back to world {WorldId}",
+                    session.PlayerName, session.WorldId);
+                await SendAsync(clientEndPoint, new NetworkMessage
+                {
+                    Type = "reconnect_response",
+                    PlayerId = "",
+                    Data = new ReconnectResponseData
+                    {
+                        Success = false,
+                        ErrorMessage = "Failed to rejoin world - world may have ended"
+                    }
+                });
+                return;
+            }
+
+            // Re-add to connected clients
+            var connectedClient = new ConnectedClient
+            {
+                EndPoint = clientEndPoint,
+                Player = restoredPlayer,
+                WorldId = session.WorldId,
+                LastActivity = DateTime.UtcNow,
+                SessionToken = session.SessionToken
+            };
+
+            _connectedClients[clientEndPoint] = connectedClient;
+
+            // Activate session
+            _sessionManager.ActivateSession(session.SessionToken);
+
+            var timeSinceDisconnect = (float)(DateTime.UtcNow - session.PlayerState!.SavedAt).TotalSeconds;
+
+            _logger.LogInformation("Player '{PlayerName}' reconnected successfully to world {WorldId}. Offline for {Time}s",
+                session.PlayerName, session.WorldId, timeSinceDisconnect);
+
+            // Send success response with restored state
+            await SendAsync(clientEndPoint, new NetworkMessage
+            {
+                Type = "reconnect_response",
+                PlayerId = restoredPlayer.PlayerId,
+                Data = new ReconnectResponseData
+                {
+                    Success = true,
+                    ErrorMessage = string.Empty,
+                    PlayerId = restoredPlayer.PlayerId,
+                    WorldId = session.WorldId,
+                    IsInLobby = session.IsInLobby,
+
+                    // Restored state
+                    Position = restoredPlayer.Position,
+                    Velocity = restoredPlayer.Velocity,
+                    Direction = restoredPlayer.Direction,
+                    CurrentRoomId = restoredPlayer.CurrentRoomId,
+
+                    Health = restoredPlayer.Health,
+                    MaxHealth = restoredPlayer.MaxHealth,
+                    Mana = restoredPlayer.Mana,
+                    MaxMana = restoredPlayer.MaxMana,
+                    Shield = restoredPlayer.Shield,
+                    Level = restoredPlayer.Level,
+                    ExperiencePoints = restoredPlayer.ExperiencePoints,
+                    IsAlive = restoredPlayer.IsAlive,
+
+                    TeamId = restoredPlayer.TeamId,
+                    PlayerClass = restoredPlayer.PlayerClass,
+
+                    InventoryCount = restoredPlayer.Inventory.Count,
+                    ActiveEffectsCount = restoredPlayer.StatusEffects.Count,
+
+                    ServerTime = (float)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds,
+                    TimeSinceDisconnect = timeSinceDisconnect
+                }
+            });
+
+            // Notify other players
+            BroadcastToWorld(session.WorldId, new NetworkMessage
+            {
+                Type = "player_reconnected",
+                PlayerId = restoredPlayer.PlayerId,
+                Data = new
+                {
+                    restoredPlayer.PlayerName,
+                    restoredPlayer.PlayerClass,
+                    restoredPlayer.TeamId
+                }
+            }, excludeEndPoint: clientEndPoint);
+
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling client reconnect from {EndPoint}", clientEndPoint);
+            await SendErrorToClient(clientEndPoint, "Reconnection failed");
+        }
+    }
+
+    /// <summary>
+    /// ⭐ RECONNECTION: Restore RealTimePlayer from saved session state
+    /// </summary>
+    private RealTimePlayer RestorePlayerFromSession(PlayerSession session, IPEndPoint endPoint)
+    {
+        var savedState = session.PlayerState!;
+
+        var player = new RealTimePlayer
+        {
+            // Identity
+            PlayerId = savedState.PlayerId,
+            PlayerName = savedState.PlayerName,
+            TeamId = savedState.TeamId,
+            PlayerClass = savedState.PlayerClass,
+            EndPoint = endPoint,
+
+            // Position & Movement
+            Position = savedState.Position,
+            Velocity = savedState.Velocity,
+            Direction = savedState.Direction,
+            CurrentRoomId = savedState.CurrentRoomId,
+
+            // Combat & Stats
+            IsAlive = savedState.IsAlive,
+            Health = savedState.Health,
+            MaxHealth = savedState.MaxHealth,
+            Mana = savedState.Mana,
+            MaxMana = savedState.MaxMana,
+            Shield = savedState.Shield,
+            MaxShield = savedState.MaxShield,
+
+            // Progression
+            Level = savedState.Level,
+            ExperiencePoints = savedState.ExperiencePoints,
+            Stats = new Dictionary<string, int>(savedState.Stats),
+
+            // Inventory (deep copy restored)
+            Inventory = savedState.Inventory.Select(item => new LootItem
+            {
+                ItemId = item.ItemId,
+                ItemName = item.ItemName,
+                ItemType = item.ItemType,
+                Rarity = item.Rarity,
+                Stats = new Dictionary<string, int>(item.Stats),
+                Value = item.Value
+            }).ToList(),
+
+            // Status Effects (restored)
+            StatusEffects = savedState.StatusEffects.Select(effect => new StatusEffect
+            {
+                EffectType = effect.EffectType,
+                Value = effect.Value,
+                Duration = effect.Duration,
+                AppliedAt = effect.AppliedAt
+            }).ToList(),
+
+            // Reset network/activity fields
+            LastActivity = DateTime.UtcNow,
+            AbilityCooldowns = new Dictionary<string, DateTime>(),
+            MovementSpeedModifier = 1.0f,
+            DamageReduction = 0.0f
+        };
+
+        // ⭐ DELTA COMPRESSION: Force next update for reconnected player
+        player.ForceNextUpdate();
+
+        return player;
+    }
+
+    private async Task SendConnectionResponse(IPEndPoint clientEndPoint, RealTimePlayer player, string worldId, string sessionToken)
     {
         var isLobby = IsLobby(worldId);
         var lobbyStats = _gameEngine.GetLobbyStats();
@@ -529,6 +762,8 @@ public class UdpNetworkService : IDisposable
                 player.PlayerId,
                 WorldId = worldId,
                 IsLobby = isLobby,
+                // ⭐ RECONNECTION: Session token for client to save
+                SessionToken = sessionToken,
                 SpawnPosition = player.Position,
                 PlayerStats = new
                 {
@@ -1406,6 +1641,26 @@ private void ProcessReliableMessages(object? state)
     }
 }
 
+/// <summary>
+/// ⭐ RECONNECTION: Cleanup expired sessions periodically
+/// </summary>
+private void CleanupExpiredSessions(object? state)
+{
+    try
+    {
+        var removedCount = _sessionManager.CleanupExpiredSessions();
+
+        if (removedCount > 0)
+        {
+            _logger.LogInformation("Cleaned up {Count} expired reconnection sessions", removedCount);
+        }
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Error cleaning up expired sessions");
+    }
+}
+
     // =============================================
     // CLIENT MANAGEMENT
     // =============================================
@@ -1557,6 +1812,27 @@ private Vector2 GetSpawnPosition(string teamId)
         _logger.LogInformation("Removing client {PlayerName} ({PlayerId}): {Reason}",
             client.Player.PlayerName, client.Player.PlayerId, reason);
 
+        // ⭐ RECONNECTION: Determine if we should save state for reconnection
+        var isGracefulDisconnect = reason.Contains("gracefully") || reason.Contains("Kicked by admin");
+        var isInLobby = IsLobby(client.WorldId);
+
+        if (!isGracefulDisconnect && !string.IsNullOrEmpty(client.SessionToken))
+        {
+            // Save player state for potential reconnection
+            _sessionManager.SavePlayerState(client.SessionToken, client.Player, client.WorldId, isInLobby);
+
+            _logger.LogInformation("Saved state for player {PlayerName}. Can reconnect within 5 minutes using session token.",
+                client.Player.PlayerName);
+        }
+        else if (!string.IsNullOrEmpty(client.SessionToken))
+        {
+            // Graceful disconnect or kick - invalidate session
+            _sessionManager.InvalidateSession(client.SessionToken, reason);
+
+            _logger.LogInformation("Invalidated session for player {PlayerName} due to: {Reason}",
+                client.Player.PlayerName, reason);
+        }
+
         // Remove from game engine
         _gameEngine.RemovePlayerFromWorld(client.WorldId, client.Player.PlayerId);
 
@@ -1569,7 +1845,9 @@ private Vector2 GetSpawnPosition(string teamId)
             {
                 client.Player.PlayerName,
                 Reason = reason,
-                Timestamp = DateTime.UtcNow
+                Timestamp = DateTime.UtcNow,
+                // ⭐ RECONNECTION: Tell clients if player can reconnect
+                CanReconnect = !isGracefulDisconnect
             }
         });
 
