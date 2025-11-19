@@ -227,6 +227,21 @@ public class LobbyManager
     }
 
     /// <summary>
+    /// Get available lobbies that are accepting players.
+    /// </summary>
+    public List<string> GetAvailableLobbies(int maxPlayersPerWorld)
+    {
+        lock (_lobbiesLock)
+        {
+            return _worldLobbies.Values
+                .Where(l => l.Status == LobbyStatus.WaitingForPlayers)
+                .Where(l => l.TotalPlayers < maxPlayersPerWorld)
+                .Select(l => l.LobbyId)
+                .ToList();
+        }
+    }
+
+    /// <summary>
     /// Get lobby info for client display.
     /// </summary>
     public LobbyInfo? GetLobbyInfo(string lobbyId)

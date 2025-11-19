@@ -299,7 +299,7 @@ public class InputProcessor
     /// </summary>
     public void ClearPlayerInputBuffer(string playerId)
     {
-        _inputBuffer.ClearPlayerSequences(playerId);
+        _inputBuffer.CleanupPlayer(playerId);
         _logger.LogDebug("Cleared input buffer for player {PlayerId}", playerId);
     }
 
@@ -316,7 +316,7 @@ public class InputProcessor
         {
             ["QueueSize"] = _inputQueue.Count,
             ["IsQueueEmpty"] = _inputQueue.IsEmpty,
-            ["InputBufferPlayerCount"] = _inputBuffer.GetTrackedPlayerCount()
+            ["InputBufferPlayerCount"] = _inputBuffer.GetAllStats().Count
         };
     }
 
