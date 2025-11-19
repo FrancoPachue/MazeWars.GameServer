@@ -13,6 +13,10 @@
     <!-- Core packages -->
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
 
+    <!-- ⭐ PERF: MessagePack for fast binary serialization (10x faster than JSON) -->
+    <PackageReference Include="MessagePack" Version="2.5.140" />
+    <PackageReference Include="MessagePack.Annotations" Version="2.5.140" />
+
     <!-- Logging -->
     <PackageReference Include="Serilog.AspNetCore" Version="8.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="5.0.0" />
