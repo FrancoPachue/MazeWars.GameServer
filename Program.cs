@@ -16,6 +16,7 @@ using MazeWars.GameServer.Services.Movement;
 using MazeWars.GameServer.Engine.AI.Interface;
 using MazeWars.GameServer.Services.AI;
 using MazeWars.GameServer.Engine.Network;
+using MazeWars.GameServer.Engine.Managers;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -103,6 +104,10 @@ try
     builder.Services.AddSingleton<ILootSystem,LootSystem>();
 
     builder.Services.AddSingleton<IMobAISystem, MobAISystem>();
+
+    // ⭐ REFACTORED: Lobby Manager (Singleton - manages lobby lifecycle and matchmaking)
+    builder.Services.AddSingleton<LobbyManager>();
+
     // Game Engine (Singleton - maintains game state)
     builder.Services.AddSingleton<RealTimeGameEngine>();
 

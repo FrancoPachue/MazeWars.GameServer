@@ -7,6 +7,7 @@ using MazeWars.GameServer.Engine.AI.Interface;
 using MazeWars.GameServer.Engine.Loot.Interface;
 using MazeWars.GameServer.Engine.Network;
 using MazeWars.GameServer.Engine.Memory;
+using MazeWars.GameServer.Engine.Managers;
 using MazeWars.GameServer.Models;
 using MazeWars.GameServer.Network;
 using MazeWars.GameServer.Network.Models;
@@ -26,6 +27,7 @@ public class RealTimeGameEngine
     private readonly IMovementSystem _movementSystem;
     private readonly ILootSystem _lootSystem;
     private readonly IMobAISystem _mobAISystem;
+    private readonly LobbyManager _lobbyManager;
 
     private readonly ConcurrentQueue<NetworkMessage> _inputQueue = new();
     private readonly Dictionary<string, GameWorld> _worlds = new();
@@ -46,10 +48,6 @@ public class RealTimeGameEngine
     private DateTime _lastFrameTime = DateTime.UtcNow;
     private readonly Random _random = new();
 
-    private readonly Dictionary<string, WorldLobby> _worldLobbies = new();
-    private readonly Timer _lobbyCleanupTimer;
-    private readonly Timer _lobbyStartTimer;
-
     public event Action<string, List<string>>? OnGameStarted;
 
     public RealTimeGameEngine(
@@ -58,17 +56,22 @@ public class RealTimeGameEngine
         ICombatSystem combatSystem,
         IMovementSystem movementSystem,
         ILootSystem lootSystem,
-        IMobAISystem mobAISystem) // ⭐ NUEVO: Inyección del MobAISystem
+        IMobAISystem mobAISystem,
+        LobbyManager lobbyManager) // ⭐ REFACTORED: Inyección del LobbyManager
     {
         _logger = logger;
         _settings = settings.Value;
         _combatSystem = combatSystem;
         _movementSystem = movementSystem;
         _lootSystem = lootSystem;
-        _mobAISystem = mobAISystem; // ⭐ NUEVO
+        _mobAISystem = mobAISystem;
+        _lobbyManager = lobbyManager; // ⭐ REFACTORED
 
         // ⭐ SYNC: Initialize input buffer for handling packet reordering
         _inputBuffer = new InputBuffer(_logger);
+
+        // ⭐ REFACTORED: Suscribirse a eventos del LobbyManager
+        _lobbyManager.OnLobbyReadyToStart += HandleLobbyReadyToStart;
 
         // ⭐ NUEVO: Suscribirse a eventos del MobAISystem
         _mobAISystem.OnMobSpawned += HandleMobSpawned;
@@ -97,15 +100,7 @@ public class RealTimeGameEngine
         var frameTimeMs = 1000.0 / _settings.TargetFPS;
         _gameLoopTimer = new Timer(GameLoop, null, TimeSpan.Zero, TimeSpan.FromMilliseconds(frameTimeMs));
 
-        // Timer para limpiar lobbies vacíos (cada 30 segundos)
-        _lobbyCleanupTimer = new Timer(CleanupEmptyLobbies, null,
-            TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
-
-        // Timer para iniciar partidas cuando el lobby lleva tiempo esperando (cada 5 segundos)
-        _lobbyStartTimer = new Timer(CheckLobbyStartConditions, null,
-            TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
-
-        _logger.LogInformation("Real-Time Game Engine started at {FPS} FPS with Combat, Movement, Loot, and AI systems", _settings.TargetFPS);
+        _logger.LogInformation("⭐ REFACTORED: Real-Time Game Engine started at {FPS} FPS with LobbyManager, Combat, Movement, Loot, and AI systems", _settings.TargetFPS);
 
     }
 
@@ -1586,83 +1581,33 @@ public class RealTimeGameEngine
     }
 
     // =============================================
-    // SISTEMA DE MATCHMAKING (sin cambios)
+    // ⭐ REFACTORED: MATCHMAKING SYSTEM (now using LobbyManager)
     // =============================================
 
     public string FindOrCreateWorld(string teamId)
     {
-        lock (_worldsLock)
-        {
-            foreach (var lobby in _worldLobbies.Values.Where(l => l.Status == LobbyStatus.WaitingForPlayers))
-            {
-                if (CanJoinLobby(lobby, teamId))
-                {
-                    _logger.LogInformation("Found available lobby {LobbyId} for team {TeamId}", lobby.LobbyId, teamId);
-                    return lobby.LobbyId;
-                }
-            }
-
-            var newLobbyId = CreateNewLobby();
-            _logger.LogInformation("Created new lobby {LobbyId} for team {TeamId}", newLobbyId, teamId);
-            return newLobbyId;
-        }
-    }
-
-    private bool CanJoinLobby(WorldLobby lobby, string teamId)
-    {
-        if (lobby.TotalPlayers >= _settings.MaxPlayersPerWorld)
-            return false;
-
-        if (!lobby.TeamPlayerCounts.TryGetValue(teamId, out var teamCount))
-            teamCount = 0;
-
-        if (teamCount >= _settings.GameBalance.MaxTeamSize)
-            return false;
-
-        var maxTeamSize = lobby.TeamPlayerCounts.Values.DefaultIfEmpty(0).Max();
-        if (teamCount == 0 && maxTeamSize >= _settings.GameBalance.MaxTeamSize)
-            return false;
-
-        return true;
-    }
-
-    private string CreateNewLobby()
-    {
-        var lobbyId = Guid.NewGuid().ToString();
-
-        var lobby = new WorldLobby
-        {
-            LobbyId = lobbyId,
-            Status = LobbyStatus.WaitingForPlayers,
-            CreatedAt = DateTime.UtcNow,
-            LastPlayerJoined = DateTime.UtcNow,
-            MinPlayersToStart = Math.Max(2, _settings.MinPlayersPerWorld),
-            MaxPlayers = _settings.MaxPlayersPerWorld,
-            TeamPlayerCounts = new Dictionary<string, int>(),
-            TotalPlayers = 0
-        };
-
-        _worldLobbies[lobbyId] = lobby;
-
-        return lobbyId;
+        // ⭐ REFACTORED: Delegate to LobbyManager
+        return _lobbyManager.FindOrCreateLobby(teamId);
     }
 
     // =============================================
-    // GESTIÓN DE JUGADORES EN LOBBIES
+    // ⭐ REFACTORED: PLAYER MANAGEMENT (now using LobbyManager)
     // =============================================
 
     public bool AddPlayerToWorld(string worldId, RealTimePlayer player)
     {
         lock (_worldsLock)
         {
+            // Check if it's an active world
             if (_worlds.TryGetValue(worldId, out var existingWorld))
             {
                 return AddPlayerToExistingWorld(existingWorld, player);
             }
 
-            if (_worldLobbies.TryGetValue(worldId, out var lobby))
+            // ⭐ REFACTORED: Delegate to LobbyManager for lobby joins
+            if (_lobbyManager.IsLobby(worldId))
             {
-                return AddPlayerToLobby(lobby, player);
+                return _lobbyManager.AddPlayerToLobby(worldId, player);
             }
 
             _logger.LogWarning("Attempted to add player to non-existent world/lobby {WorldId}", worldId);
@@ -1684,205 +1629,84 @@ public class RealTimeGameEngine
         return true;
     }
 
-    private bool AddPlayerToLobby(WorldLobby lobby, RealTimePlayer player)
-    {
-        if (lobby.Status != LobbyStatus.WaitingForPlayers)
-        {
-            _logger.LogDebug("Cannot join lobby {LobbyId} - status: {Status}", lobby.LobbyId, lobby.Status);
-            return false;
-        }
-
-        if (!CanJoinLobby(lobby, player.TeamId))
-        {
-            _logger.LogDebug("Cannot join lobby {LobbyId} - team restrictions", lobby.LobbyId);
-            return false;
-        }
-
-        if (!lobby.TeamPlayerCounts.ContainsKey(player.TeamId))
-        {
-            lobby.TeamPlayerCounts[player.TeamId] = 0;
-        }
-
-        lobby.TeamPlayerCounts[player.TeamId]++;
-        lobby.TotalPlayers++;
-        lobby.LastPlayerJoined = DateTime.UtcNow;
-        lobby.Players[player.PlayerId] = player;
-
-        _logger.LogInformation("Player {PlayerName} joined lobby {LobbyId}. Players: {Count}/{Max}, Team {TeamId}: {TeamCount}",
-            player.PlayerName, lobby.LobbyId, lobby.TotalPlayers, lobby.MaxPlayers,
-            player.TeamId, lobby.TeamPlayerCounts[player.TeamId]);
-
-        CheckIfLobbyCanStart(lobby);
-
-        return true;
-    }
-
     // =============================================
-    // INICIO DE PARTIDAS
+    // ⭐ REFACTORED: GAME START FROM LOBBY (event handler)
     // =============================================
 
-    private void CheckIfLobbyCanStart(WorldLobby lobby)
-    {
-        if (lobby.Status != LobbyStatus.WaitingForPlayers)
-            return;
-
-        if (lobby.TotalPlayers >= lobby.MaxPlayers)
-        {
-            _logger.LogInformation("Starting lobby {LobbyId} - FULL ({Players} players)",
-                lobby.LobbyId, lobby.TotalPlayers);
-            StartLobbyGame(lobby);
-            return;
-        }
-
-        var teamsCount = lobby.TeamPlayerCounts.Count;
-        if (lobby.TotalPlayers >= lobby.MinPlayersToStart && teamsCount >= 2)
-        {
-            var timeSinceLastJoin = DateTime.UtcNow - lobby.LastPlayerJoined;
-
-            if (timeSinceLastJoin.TotalSeconds >= _settings.LobbySettings.MaxWaitTimeSeconds)
-            {
-                _logger.LogInformation("Starting lobby {LobbyId} - TIMEOUT ({Players} players, {Teams} teams)",
-                    lobby.LobbyId, lobby.TotalPlayers, teamsCount);
-                StartLobbyGame(lobby);
-                return;
-            }
-        }
-    }
-
-    private void StartLobbyGame(WorldLobby lobby)
-    {
-        try
-        {
-            lobby.Status = LobbyStatus.Starting;
-
-            var world = new GameWorld
-            {
-                WorldId = lobby.LobbyId,
-                Rooms = GenerateWorldRooms(),
-                ExtractionPoints = GenerateExtractionPoints(),
-                LootTables = new List<LootTable>(_baseLootTables.Values),
-                CreatedAt = DateTime.UtcNow,
-                Players = new ConcurrentDictionary<string, RealTimePlayer>()
-            };
-
-            foreach (var player in lobby.Players.Values)
-            {
-                player.Position = GetTeamSpawnPosition(player.TeamId);
-                player.CurrentRoomId = _movementSystem.GetRoomIdByPosition(world, player.Position);
-                world.Players[player.PlayerId] = player;
-            }
-
-            // ⭐ REFACTORIZADO: Usar MobAISystem para spawn inicial de mobs
-            var spawnedMobs = _mobAISystem.SpawnInitialMobs(world);
-            SpawnInitialLoot(world);
-
-            _worlds[world.WorldId] = world;
-            _worldLobbies.Remove(lobby.LobbyId);
-
-            _logger.LogInformation("Game started! World {WorldId} with {PlayerCount} players from {TeamCount} teams and {MobCount} mobs",
-                world.WorldId, world.Players.Count, lobby.TeamPlayerCounts.Count, spawnedMobs.Count);
-
-            OnGameStarted?.Invoke(world.WorldId, world.Players.Keys.ToList());
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error starting lobby game {LobbyId}", lobby.LobbyId);
-            lobby.Status = LobbyStatus.Error;
-        }
-    }
-
-    private void CheckLobbyStartConditions(object? state)
+    /// <summary>
+    /// ⭐ REFACTORED: Event handler called by LobbyManager when lobby is ready to start.
+    /// Creates the game world from lobby data.
+    /// </summary>
+    private void HandleLobbyReadyToStart(WorldLobby lobby)
     {
         try
         {
             lock (_worldsLock)
             {
-                var lobbiesReadyToStart = _worldLobbies.Values
-                    .Where(l => l.Status == LobbyStatus.WaitingForPlayers)
-                    .Where(l => ShouldStartLobby(l))
-                    .ToList();
+                _logger.LogInformation("Creating game world from lobby {LobbyId} with {PlayerCount} players",
+                    lobby.LobbyId, lobby.TotalPlayers);
 
-                foreach (var lobby in lobbiesReadyToStart)
+                var world = new GameWorld
                 {
-                    CheckIfLobbyCanStart(lobby);
+                    WorldId = lobby.LobbyId,
+                    Rooms = GenerateWorldRooms(),
+                    ExtractionPoints = GenerateExtractionPoints(),
+                    LootTables = new List<LootTable>(_baseLootTables.Values),
+                    CreatedAt = DateTime.UtcNow,
+                    Players = new ConcurrentDictionary<string, RealTimePlayer>()
+                };
+
+                // Transfer players from lobby to world
+                foreach (var player in lobby.Players.Values)
+                {
+                    player.Position = GetTeamSpawnPosition(player.TeamId);
+                    player.CurrentRoomId = _movementSystem.GetRoomIdByPosition(world, player.Position);
+                    world.Players[player.PlayerId] = player;
                 }
+
+                // ⭐ Spawn initial mobs and loot
+                var spawnedMobs = _mobAISystem.SpawnInitialMobs(world);
+                SpawnInitialLoot(world);
+
+                // Add world to active worlds
+                _worlds[world.WorldId] = world;
+
+                _logger.LogInformation("✅ Game started! World {WorldId} with {PlayerCount} players from {TeamCount} teams and {MobCount} mobs",
+                    world.WorldId, world.Players.Count, lobby.TeamPlayerCounts.Count, spawnedMobs.Count);
+
+                // ⭐ REFACTORED: Notify LobbyManager that transition is complete
+                _lobbyManager.CompleteLobbyStart(lobby.LobbyId);
+
+                // Trigger event for NetworkService to notify clients
+                OnGameStarted?.Invoke(world.WorldId, world.Players.Keys.ToList());
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error checking lobby start conditions");
+            _logger.LogError(ex, "❌ Error creating world from lobby {LobbyId}", lobby.LobbyId);
+            _lobbyManager.MarkLobbyError(lobby.LobbyId, ex.Message);
         }
     }
 
-    private bool ShouldStartLobby(WorldLobby lobby)
-    {
-        if (lobby.TotalPlayers >= lobby.MinPlayersToStart)
-        {
-            var timeSinceCreated = DateTime.UtcNow - lobby.CreatedAt;
-            var timeSinceLastJoin = DateTime.UtcNow - lobby.LastPlayerJoined;
-
-            return timeSinceCreated.TotalSeconds >= _settings.LobbySettings.MaxWaitTimeSeconds * 2 ||
-                   timeSinceLastJoin.TotalSeconds >= _settings.LobbySettings.MaxWaitTimeSeconds;
-        }
-
-        return false;
-    }
-
-    private void CleanupEmptyLobbies(object? state)
-    {
-        try
-        {
-            lock (_worldsLock)
-            {
-                var emptyLobbies = _worldLobbies.Values
-                    .Where(l => l.TotalPlayers == 0)
-                    .Where(l => DateTime.UtcNow - l.CreatedAt > TimeSpan.FromMinutes(5))
-                    .ToList();
-
-                foreach (var lobby in emptyLobbies)
-                {
-                    _worldLobbies.Remove(lobby.LobbyId);
-                    _logger.LogInformation("Removed empty lobby {LobbyId}", lobby.LobbyId);
-                }
-
-                var errorLobbies = _worldLobbies.Values
-                    .Where(l => l.Status == LobbyStatus.Error)
-                    .Where(l => DateTime.UtcNow - l.CreatedAt > TimeSpan.FromMinutes(1))
-                    .ToList();
-
-                foreach (var lobby in errorLobbies)
-                {
-                    _worldLobbies.Remove(lobby.LobbyId);
-                    _logger.LogInformation("Removed error lobby {LobbyId}", lobby.LobbyId);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error cleaning up lobbies");
-        }
-    }
+    // =============================================
+    // ⭐ REFACTORED: LOBBY STATS (delegated to LobbyManager)
+    // =============================================
 
     public Dictionary<string, object> GetLobbyStats()
     {
         lock (_worldsLock)
         {
-            var totalLobbies = _worldLobbies.Count;
-            var totalLobbyPlayers = _worldLobbies.Values.Sum(l => l.TotalPlayers);
+            // ⭐ REFACTORED: Get lobby stats from LobbyManager
+            var lobbyStats = _lobbyManager.GetLobbyStats();
+
+            // Add world stats
             var totalActiveWorlds = _worlds.Count;
             var totalActivePlayers = _worlds.Values.Sum(w => w.Players.Count);
 
-            return new Dictionary<string, object>
-            {
-                ["TotalLobbies"] = totalLobbies,
-                ["LobbyPlayers"] = totalLobbyPlayers,
-                ["ActiveWorlds"] = totalActiveWorlds,
-                ["ActivePlayers"] = totalActivePlayers,
-                ["LobbiesByStatus"] = _worldLobbies.Values
-                    .GroupBy(l => l.Status.ToString())
-                    .ToDictionary(g => g.Key, g => g.Count()),
-                ["AveragePlayersPerLobby"] = totalLobbies > 0 ? (double)totalLobbyPlayers / totalLobbies : 0
-            };
+            lobbyStats["ActiveWorlds"] = totalActiveWorlds;
+            lobbyStats["ActivePlayers"] = totalActivePlayers;
+
+            return lobbyStats;
         }
     }
 
@@ -1983,24 +1807,20 @@ public class RealTimeGameEngine
         }
     }
 
+    /// <summary>
+    /// ⭐ REFACTORED: Check if a world ID is a lobby (delegated to LobbyManager).
+    /// </summary>
     public bool IsWorldLobby(string worldId)
     {
-        lock (_worldsLock)
-        {
-            return _worldLobbies.ContainsKey(worldId);
-        }
+        return _lobbyManager.IsLobby(worldId);
     }
 
+    /// <summary>
+    /// ⭐ REFACTORED: Get lobby info (delegated to LobbyManager).
+    /// </summary>
     public WorldLobby? GetLobbyInfo(string worldId)
     {
-        lock (_worldsLock)
-        {
-            if (_worldLobbies.TryGetValue(worldId, out var lobby))
-            {
-                return lobby;
-            }
-            return null;
-        }
+        return _lobbyManager.GetLobby(worldId);
     }
 
     // =============================================
@@ -2179,8 +1999,15 @@ public class RealTimeGameEngine
     public void Dispose()
     {
         _gameLoopTimer?.Dispose();
-        _lobbyCleanupTimer?.Dispose();
-        _lobbyStartTimer?.Dispose();
+
+        // ⭐ REFACTORED: Dispose LobbyManager (handles its own timers)
+        _lobbyManager?.Dispose();
+
+        // ⭐ REFACTORED: Desuscribirse de eventos del LobbyManager
+        if (_lobbyManager != null)
+        {
+            _lobbyManager.OnLobbyReadyToStart -= HandleLobbyReadyToStart;
+        }
 
         // ⭐ NUEVO: Desuscribirse de eventos del MobAISystem
         if (_mobAISystem != null)
