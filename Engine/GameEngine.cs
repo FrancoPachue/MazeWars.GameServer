@@ -5,6 +5,7 @@ using MazeWars.GameServer.Engine.Movement.Interface;
 using MazeWars.GameServer.Engine.Movement.Settings;
 using MazeWars.GameServer.Engine.AI.Interface;
 using MazeWars.GameServer.Engine.Loot.Interface;
+using MazeWars.GameServer.Engine.Network;
 using MazeWars.GameServer.Models;
 using MazeWars.GameServer.Network;
 using MazeWars.GameServer.Network.Models;
@@ -29,6 +30,9 @@ public class RealTimeGameEngine
     private readonly Dictionary<string, GameWorld> _worlds = new();
     private readonly Dictionary<string, LootTable> _baseLootTables = new();
     private readonly Timer _gameLoopTimer;
+
+    // ⭐ SYNC: Input buffer for handling UDP packet reordering
+    private readonly InputBuffer _inputBuffer;
 
     private readonly object _worldsLock = new object();
     private readonly ConcurrentDictionary<string, List<CombatEvent>> _recentCombatEvents = new();
@@ -61,6 +65,9 @@ public class RealTimeGameEngine
         _movementSystem = movementSystem;
         _lootSystem = lootSystem;
         _mobAISystem = mobAISystem; // ⭐ NUEVO
+
+        // ⭐ SYNC: Initialize input buffer for handling packet reordering
+        _inputBuffer = new InputBuffer(_logger);
 
         // ⭐ NUEVO: Suscribirse a eventos del MobAISystem
         _mobAISystem.OnMobSpawned += HandleMobSpawned;
@@ -402,6 +409,9 @@ public class RealTimeGameEngine
                     // Limpiar datos de sistemas especializados
                     _movementSystem.CleanupPlayerTracker(playerId);
 
+                    // ⭐ SYNC: Cleanup input buffer for disconnected player
+                    _inputBuffer.CleanupPlayer(playerId);
+
                     _logger.LogInformation("Removed player {PlayerName} from active world {WorldId}",
                         removedPlayer.PlayerName, worldId);
 
@@ -424,6 +434,9 @@ public class RealTimeGameEngine
                 {
                     // Limpiar datos del MovementSystem también para lobbies
                     _movementSystem.CleanupPlayerTracker(playerId);
+
+                    // ⭐ SYNC: Cleanup input buffer for disconnected player
+                    _inputBuffer.CleanupPlayer(playerId);
 
                     if (lobby.TeamPlayerCounts.TryGetValue(removedPlayer.TeamId, out var teamCount))
                     {
@@ -663,7 +676,17 @@ public class RealTimeGameEngine
         {
             case "player_input":
                 var playerInput = (PlayerInputMessage)input.Data;
-                if (playerInput != null) ProcessPlayerInput(player, playerInput);
+                if (playerInput != null)
+                {
+                    // ⭐ SYNC: Use InputBuffer to handle packet reordering
+                    var orderedInputs = _inputBuffer.ProcessInput(player.PlayerId, playerInput);
+
+                    // Process inputs in correct order
+                    foreach (var orderedInput in orderedInputs)
+                    {
+                        ProcessPlayerInput(player, orderedInput);
+                    }
+                }
                 break;
 
             case "loot_grab":
@@ -1332,8 +1355,23 @@ public class RealTimeGameEngine
     {
         var dirtyMobs = world.Mobs.Values.Where(m => m.IsDirty).ToList();
 
+        // ⭐ SYNC: Collect acknowledged input sequences for client reconciliation
+        var acknowledgedInputs = new Dictionary<string, uint>();
+        foreach (var player in world.Players.Values)
+        {
+            acknowledgedInputs[player.PlayerId] = _inputBuffer.GetLastAcknowledgedSequence(player.PlayerId);
+        }
+
         var worldUpdate = new WorldUpdateMessage
         {
+            // ⭐ SYNC: Critical synchronization data
+            AcknowledgedInputs = acknowledgedInputs,
+            ServerTime = (float)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds,
+
+            // Frame counter
+            FrameNumber = _frameNumber,
+
+            // Game state updates
             Players = world.Players.Values.Select(p => new PlayerStateUpdate
             {
                 PlayerId = p.PlayerId,
@@ -1355,9 +1393,7 @@ public class RealTimeGameEngine
                 Position = m.Position,
                 State = m.State,
                 Health = m.Health
-            }).ToList(),
-
-            FrameNumber = _frameNumber
+            }).ToList()
         };
 
         foreach (var mob in dirtyMobs)
