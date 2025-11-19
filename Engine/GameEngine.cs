@@ -28,16 +28,11 @@ public class RealTimeGameEngine
     private readonly ILootSystem _lootSystem;
     private readonly IMobAISystem _mobAISystem;
     private readonly LobbyManager _lobbyManager;
+    private readonly WorldManager _worldManager;
+    private readonly InputProcessor _inputProcessor;
 
-    private readonly ConcurrentQueue<NetworkMessage> _inputQueue = new();
-    private readonly Dictionary<string, GameWorld> _worlds = new();
-    private readonly Dictionary<string, LootTable> _baseLootTables = new();
     private readonly Timer _gameLoopTimer;
 
-    // ⭐ SYNC: Input buffer for handling UDP packet reordering
-    private readonly InputBuffer _inputBuffer;
-
-    private readonly object _worldsLock = new object();
     private readonly ConcurrentDictionary<string, List<CombatEvent>> _recentCombatEvents = new();
     private readonly ConcurrentDictionary<string, List<LootUpdate>> _recentLootUpdates = new();
 
@@ -46,7 +41,6 @@ public class RealTimeGameEngine
 
     private int _frameNumber = 0;
     private DateTime _lastFrameTime = DateTime.UtcNow;
-    private readonly Random _random = new();
 
     public event Action<string, List<string>>? OnGameStarted;
 
@@ -57,7 +51,9 @@ public class RealTimeGameEngine
         IMovementSystem movementSystem,
         ILootSystem lootSystem,
         IMobAISystem mobAISystem,
-        LobbyManager lobbyManager) // ⭐ REFACTORED: Inyección del LobbyManager
+        LobbyManager lobbyManager,
+        WorldManager worldManager,
+        InputProcessor inputProcessor) // ⭐ REFACTORED: Inyección de nuevos managers
     {
         _logger = logger;
         _settings = settings.Value;
@@ -65,42 +61,49 @@ public class RealTimeGameEngine
         _movementSystem = movementSystem;
         _lootSystem = lootSystem;
         _mobAISystem = mobAISystem;
-        _lobbyManager = lobbyManager; // ⭐ REFACTORED
+        _lobbyManager = lobbyManager;
+        _worldManager = worldManager;
+        _inputProcessor = inputProcessor;
 
-        // ⭐ SYNC: Initialize input buffer for handling packet reordering
-        _inputBuffer = new InputBuffer(_logger);
+        // ⭐ REFACTORED: Configure InputProcessor with player lookup
+        _inputProcessor.PlayerLookup = FindPlayer;
 
-        // ⭐ REFACTORED: Suscribirse a eventos del LobbyManager
+        // ⭐ REFACTORED: Subscribe to LobbyManager events
         _lobbyManager.OnLobbyReadyToStart += HandleLobbyReadyToStart;
 
-        // ⭐ NUEVO: Suscribirse a eventos del MobAISystem
+        // ⭐ REFACTORED: Subscribe to InputProcessor events
+        _inputProcessor.OnPlayerInput += ProcessPlayerInput;
+        _inputProcessor.OnLootGrab += ProcessLootGrab;
+        _inputProcessor.OnChat += ProcessChat;
+        _inputProcessor.OnUseItem += ProcessUseItem;
+        _inputProcessor.OnExtraction += ProcessExtraction;
+        _inputProcessor.OnTradeRequest += ProcessTradeRequest;
+
+        // ⭐ NUEVO: Subscribe to MobAISystem events
         _mobAISystem.OnMobSpawned += HandleMobSpawned;
         _mobAISystem.OnMobDeath += HandleMobDeath;
         _mobAISystem.OnMobStateChanged += HandleMobStateChanged;
         _mobAISystem.OnMobAttack += HandleMobAttack;
         _mobAISystem.OnBossSpawned += HandleBossSpawned;
 
-        // Suscribirse a eventos del sistema de loot
+        // Subscribe to LootSystem events
         _lootSystem.OnLootSpawned += HandleLootSpawned;
         _lootSystem.OnLootTaken += HandleLootTaken;
         _lootSystem.OnLootRemoved += HandleLootRemoved;
         _lootSystem.OnItemUsed += HandleItemUsed;
 
-        // Suscribirse a eventos del sistema de combate
+        // Subscribe to CombatSystem events
         _combatSystem.OnCombatEvent += HandleCombatEvent;
         _combatSystem.OnPlayerDeath += HandlePlayerDeath;
 
-        // Initialize loot tables first
-        InitializeLootTables();
-
-        // ⭐ NUEVO: Inicializar templates de mobs
+        // ⭐ NUEVO: Initialize mob templates
         InitializeMobTemplates();
 
         // Start game loop at target FPS
         var frameTimeMs = 1000.0 / _settings.TargetFPS;
         _gameLoopTimer = new Timer(GameLoop, null, TimeSpan.Zero, TimeSpan.FromMilliseconds(frameTimeMs));
 
-        _logger.LogInformation("⭐ REFACTORED: Real-Time Game Engine started at {FPS} FPS with LobbyManager, Combat, Movement, Loot, and AI systems", _settings.TargetFPS);
+        _logger.LogInformation("⭐ REFACTORED: Real-Time Game Engine started at {FPS} FPS with LobbyManager, WorldManager, InputProcessor, Combat, Movement, Loot, and AI systems", _settings.TargetFPS);
 
     }
 
@@ -359,11 +362,14 @@ public class RealTimeGameEngine
     // PUBLIC API METHODS (sin cambios)
     // =============================================
 
+    /// <summary>
+    /// ⭐ REFACTORED: Queue input for processing (delegated to InputProcessor).
+    /// </summary>
     public void QueueInput(NetworkMessage input)
     {
         if (input != null)
         {
-            _inputQueue.Enqueue(input);
+            _inputProcessor.QueueInput(input);
         }
     }
 
@@ -657,83 +663,13 @@ public class RealTimeGameEngine
     // INPUT PROCESSING (sin cambios grandes)
     // =============================================
 
+    /// <summary>
+    /// ⭐ REFACTORED: Process input queue (delegated to InputProcessor).
+    /// InputProcessor will trigger events that call our process methods.
+    /// </summary>
     private void ProcessInputQueue()
     {
-        var processedCount = 0;
-        var maxProcessPerFrame = 1000;
-
-        while (_inputQueue.TryDequeue(out var input) && processedCount < maxProcessPerFrame)
-        {
-            try
-            {
-                ProcessInput(input);
-                processedCount++;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error processing input {InputType} from player {PlayerId}",
-                    input.Type, input.PlayerId);
-            }
-        }
-
-        if (processedCount == maxProcessPerFrame && !_inputQueue.IsEmpty)
-        {
-            _logger.LogWarning("Input queue processing limit reached, {QueueSize} inputs remaining",
-                _inputQueue.Count);
-        }
-    }
-
-    private void ProcessInput(NetworkMessage input)
-    {
-        var player = FindPlayer(input.PlayerId);
-        if (player == null)
-        {
-            _logger.LogDebug("Received input for unknown player {PlayerId}", input.PlayerId);
-            return;
-        }
-
-        switch (input.Type.ToLower())
-        {
-            case "player_input":
-                var playerInput = (PlayerInputMessage)input.Data;
-                if (playerInput != null)
-                {
-                    // ⭐ SYNC: Use InputBuffer to handle packet reordering
-                    var orderedInputs = _inputBuffer.ProcessInput(player.PlayerId, playerInput);
-
-                    // Process inputs in correct order
-                    foreach (var orderedInput in orderedInputs)
-                    {
-                        ProcessPlayerInput(player, orderedInput);
-                    }
-                }
-                break;
-
-            case "loot_grab":
-                var lootGrab = (LootGrabMessage)input.Data;
-                if (lootGrab != null) ProcessLootGrab(player, lootGrab);
-                break;
-
-            case "chat":
-                var chat = (ChatMessage)input.Data;
-                if (chat != null) ProcessChat(player, chat);
-                break;
-
-            case "use_item":
-                var useItem = (UseItemMessage)input.Data;
-                if (useItem != null) ProcessUseItem(player, useItem);
-                break;
-
-            case "extraction":
-                var extraction = (ExtractionMessage)input.Data;
-                if (extraction != null) ProcessExtraction(player, extraction);
-                break;
-
-            case "trade_request":
-                var tradeRequest = (TradeRequestMessage)input.Data;
-                if (tradeRequest != null) ProcessTradeRequest(player, tradeRequest);
-                break;
-        }
+        _inputProcessor.ProcessInputQueue();
     }
 
     // =============================================
@@ -1615,6 +1551,9 @@ public class RealTimeGameEngine
         }
     }
 
+    /// <summary>
+    /// ⭐ REFACTORED: Add player to existing world.
+    /// </summary>
     private bool AddPlayerToExistingWorld(GameWorld world, RealTimePlayer player)
     {
         if (world.Players.Count >= _settings.MaxPlayersPerWorld)
@@ -1622,7 +1561,7 @@ public class RealTimeGameEngine
             return false;
         }
 
-        player.Position = GetTeamSpawnPosition(player.TeamId);
+        player.Position = _worldManager.GetTeamSpawnPosition(player.TeamId);
         player.CurrentRoomId = _movementSystem.GetRoomIdByPosition(world, player.Position);
         world.Players[player.PlayerId] = player;
 
@@ -1635,51 +1574,43 @@ public class RealTimeGameEngine
 
     /// <summary>
     /// ⭐ REFACTORED: Event handler called by LobbyManager when lobby is ready to start.
-    /// Creates the game world from lobby data.
+    /// Creates the game world from lobby data using WorldManager.
     /// </summary>
     private void HandleLobbyReadyToStart(WorldLobby lobby)
     {
         try
         {
-            lock (_worldsLock)
+            _logger.LogInformation("Creating game world from lobby {LobbyId} with {PlayerCount} players",
+                lobby.LobbyId, lobby.TotalPlayers);
+
+            // Prepare players with spawn positions
+            var playersDict = new Dictionary<string, RealTimePlayer>();
+            foreach (var player in lobby.Players.Values)
             {
-                _logger.LogInformation("Creating game world from lobby {LobbyId} with {PlayerCount} players",
-                    lobby.LobbyId, lobby.TotalPlayers);
-
-                var world = new GameWorld
-                {
-                    WorldId = lobby.LobbyId,
-                    Rooms = GenerateWorldRooms(),
-                    ExtractionPoints = GenerateExtractionPoints(),
-                    LootTables = new List<LootTable>(_baseLootTables.Values),
-                    CreatedAt = DateTime.UtcNow,
-                    Players = new ConcurrentDictionary<string, RealTimePlayer>()
-                };
-
-                // Transfer players from lobby to world
-                foreach (var player in lobby.Players.Values)
-                {
-                    player.Position = GetTeamSpawnPosition(player.TeamId);
-                    player.CurrentRoomId = _movementSystem.GetRoomIdByPosition(world, player.Position);
-                    world.Players[player.PlayerId] = player;
-                }
-
-                // ⭐ Spawn initial mobs and loot
-                var spawnedMobs = _mobAISystem.SpawnInitialMobs(world);
-                SpawnInitialLoot(world);
-
-                // Add world to active worlds
-                _worlds[world.WorldId] = world;
-
-                _logger.LogInformation("✅ Game started! World {WorldId} with {PlayerCount} players from {TeamCount} teams and {MobCount} mobs",
-                    world.WorldId, world.Players.Count, lobby.TeamPlayerCounts.Count, spawnedMobs.Count);
-
-                // ⭐ REFACTORED: Notify LobbyManager that transition is complete
-                _lobbyManager.CompleteLobbyStart(lobby.LobbyId);
-
-                // Trigger event for NetworkService to notify clients
-                OnGameStarted?.Invoke(world.WorldId, world.Players.Keys.ToList());
+                player.Position = _worldManager.GetTeamSpawnPosition(player.TeamId);
+                playersDict[player.PlayerId] = player;
             }
+
+            // ⭐ REFACTORED: Use WorldManager to create world (handles rooms, extraction, loot)
+            var world = _worldManager.CreateWorld(lobby.LobbyId, playersDict);
+
+            // Set player room IDs after world creation
+            foreach (var player in world.Players.Values)
+            {
+                player.CurrentRoomId = _movementSystem.GetRoomIdByPosition(world, player.Position);
+            }
+
+            // ⭐ Spawn initial mobs
+            var spawnedMobs = _mobAISystem.SpawnInitialMobs(world);
+
+            _logger.LogInformation("✅ Game started! World {WorldId} with {PlayerCount} players from {TeamCount} teams and {MobCount} mobs",
+                world.WorldId, world.Players.Count, lobby.TeamPlayerCounts.Count, spawnedMobs.Count);
+
+            // ⭐ REFACTORED: Notify LobbyManager that transition is complete
+            _lobbyManager.CompleteLobbyStart(lobby.LobbyId);
+
+            // Trigger event for NetworkService to notify clients
+            OnGameStarted?.Invoke(world.WorldId, world.Players.Keys.ToList());
         }
         catch (Exception ex)
         {
@@ -1692,22 +1623,22 @@ public class RealTimeGameEngine
     // ⭐ REFACTORED: LOBBY STATS (delegated to LobbyManager)
     // =============================================
 
+    /// <summary>
+    /// ⭐ REFACTORED: Get combined lobby and world stats.
+    /// </summary>
     public Dictionary<string, object> GetLobbyStats()
     {
-        lock (_worldsLock)
+        // ⭐ REFACTORED: Get lobby stats from LobbyManager
+        var lobbyStats = _lobbyManager.GetLobbyStats();
+
+        // ⭐ REFACTORED: Add world stats from WorldManager
+        var worldStats = _worldManager.GetWorldStats();
+        foreach (var (key, value) in worldStats)
         {
-            // ⭐ REFACTORED: Get lobby stats from LobbyManager
-            var lobbyStats = _lobbyManager.GetLobbyStats();
-
-            // Add world stats
-            var totalActiveWorlds = _worlds.Count;
-            var totalActivePlayers = _worlds.Values.Sum(w => w.Players.Count);
-
-            lobbyStats["ActiveWorlds"] = totalActiveWorlds;
-            lobbyStats["ActivePlayers"] = totalActivePlayers;
-
-            return lobbyStats;
+            lobbyStats[key] = value;
         }
+
+        return lobbyStats;
     }
 
     /// <summary>
@@ -1727,64 +1658,40 @@ public class RealTimeGameEngine
     }
 
     // =============================================
-    // HELPER METHODS
+    // =============================================
+    // ⭐ REFACTORED: HELPER METHODS (delegated to WorldManager)
     // =============================================
 
+    /// <summary>
+    /// ⭐ REFACTORED: Find player across all worlds (delegated to WorldManager).
+    /// </summary>
     private RealTimePlayer? FindPlayer(string playerId)
     {
-        lock (_worldsLock)
-        {
-            foreach (var world in _worlds.Values)
-            {
-                if (world.Players.TryGetValue(playerId, out var player))
-                    return player;
-            }
-
-            foreach (var lobby in _worldLobbies.Values)
-            {
-                if (lobby.Players.TryGetValue(playerId, out var player))
-                    return player;
-            }
-        }
-        return null;
+        return _worldManager.FindPlayer(playerId);
     }
 
+    /// <summary>
+    /// ⭐ REFACTORED: Find world containing player (delegated to WorldManager).
+    /// </summary>
     private GameWorld? FindWorldByPlayer(string playerId)
     {
-        lock (_worldsLock)
-        {
-            foreach (var world in _worlds.Values)
-            {
-                if (world.Players.ContainsKey(playerId))
-                    return world;
-            }
-        }
-        return null;
+        return _worldManager.FindWorldByPlayer(playerId);
     }
 
-    // ⭐ NUEVOS HELPER METHODS PARA MOB AI SYSTEM
-
+    /// <summary>
+    /// ⭐ REFACTORED: Find world by ID (delegated to WorldManager).
+    /// </summary>
     private GameWorld? FindWorldById(string worldId)
     {
-        lock (_worldsLock)
-        {
-            if (_worlds.TryGetValue(worldId, out var world))
-                return world;
-        }
-        return null;
+        return _worldManager.GetWorld(worldId);
     }
 
+    /// <summary>
+    /// ⭐ REFACTORED: Find world ID containing player (delegated to WorldManager).
+    /// </summary>
     private string FindWorldIdByPlayer(string playerId)
     {
-        lock (_worldsLock)
-        {
-            foreach (var (worldId, world) in _worlds)
-            {
-                if (world.Players.ContainsKey(playerId))
-                    return worldId;
-            }
-        }
-        return "";
+        return _worldManager.FindWorldIdByPlayer(playerId) ?? string.Empty;
     }
 
     private void LogPerformanceStats()

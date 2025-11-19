@@ -105,8 +105,10 @@ try
 
     builder.Services.AddSingleton<IMobAISystem, MobAISystem>();
 
-    // ⭐ REFACTORED: Lobby Manager (Singleton - manages lobby lifecycle and matchmaking)
-    builder.Services.AddSingleton<LobbyManager>();
+    // ⭐ REFACTORED: Managers (Singleton - separated concerns for better maintainability)
+    builder.Services.AddSingleton<LobbyManager>();       // Lobby lifecycle & matchmaking
+    builder.Services.AddSingleton<WorldManager>();       // World generation & management
+    builder.Services.AddSingleton<InputProcessor>();     // Input queue & UDP packet ordering
 
     // Game Engine (Singleton - maintains game state)
     builder.Services.AddSingleton<RealTimeGameEngine>();
