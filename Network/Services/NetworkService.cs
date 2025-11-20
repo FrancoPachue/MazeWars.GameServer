@@ -1343,7 +1343,7 @@ public class UdpNetworkService : IDisposable
                 update.MobUpdates?.Any() == true)
             {
                 await SendIfSmallEnough(clientEndPoint, CreateNetworkMessage("frame_update", string.Empty,
-                    new FrameUpdateData { FrameNumber = update.FrameNumber }));
+                    new FrameUpdateData { FrameNumber = (uint) update.FrameNumber }));
             }
         }
         catch (Exception ex)
