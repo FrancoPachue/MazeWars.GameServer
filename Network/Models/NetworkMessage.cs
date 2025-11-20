@@ -4,7 +4,8 @@ namespace MazeWars.GameServer.Network.Models;
 
 /// <summary>
 /// Base network message with MessagePack serialization support.
-/// Data uses object type for client compatibility.
+/// Data uses byte[] for pre-serialized MessagePack data following the spec.
+/// The Type field acts as a discriminator for the payload type.
 /// </summary>
 [MessagePackObject]
 public class NetworkMessage
@@ -16,7 +17,7 @@ public class NetworkMessage
     public string PlayerId { get; set; } = string.Empty;
 
     [Key(2)]
-    public object Data { get; set; } = null!;
+    public byte[] Data { get; set; } = Array.Empty<byte>();
 
     [Key(3)]
     public DateTime Timestamp { get; set; } = DateTime.UtcNow;
