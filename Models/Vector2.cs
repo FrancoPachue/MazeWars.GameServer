@@ -42,8 +42,10 @@ public struct Vector2
     public static bool operator ==(Vector2 a, Vector2 b) => Math.Abs(a.X - b.X) < float.Epsilon && Math.Abs(a.Y - b.Y) < float.Epsilon;
     public static bool operator !=(Vector2 a, Vector2 b) => !(a == b);
 
-
+    [IgnoreMember]
     public readonly float Magnitude => (float)Math.Sqrt(X * X + Y * Y);
+
+    [IgnoreMember]
     public readonly float SqrMagnitude => X * X + Y * Y; 
 
 
@@ -182,8 +184,10 @@ public struct Vector2
     // UTILITY METHODS
     // =============================================
 
+    [IgnoreMember]
     public readonly bool IsNormalized => Math.Abs(SqrMagnitude - 1f) < 0.01f;
 
+    [IgnoreMember]
     public readonly bool IsZero => X == 0f && Y == 0f;
 
     public readonly Vector2 Abs() => new Vector2(Math.Abs(X), Math.Abs(Y));
