@@ -3,7 +3,7 @@ using MessagePack;
 
 namespace MazeWars.GameServer.Network.Models;
 
-[MessagePackObject]
+[MessagePackObject(keyAsPropertyName: false)]
 public class MobUpdate
 {
     [Key(0)]

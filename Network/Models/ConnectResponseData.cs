@@ -5,7 +5,7 @@ namespace MazeWars.GameServer.Network.Models;
 /// <summary>
 /// Server response to initial connection with session token for reconnection.
 /// </summary>
-[MessagePackObject]
+[MessagePackObject(keyAsPropertyName: false)]
 public class ConnectResponseData
 {
     [Key(0)]

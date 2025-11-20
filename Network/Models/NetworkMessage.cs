@@ -7,7 +7,7 @@ namespace MazeWars.GameServer.Network.Models;
 /// Data uses byte[] for pre-serialized MessagePack data following the spec.
 /// The Type field acts as a discriminator for the payload type.
 /// </summary>
-[MessagePackObject]
+[MessagePackObject(keyAsPropertyName: false)]
 public class NetworkMessage
 {
     [Key(0)]

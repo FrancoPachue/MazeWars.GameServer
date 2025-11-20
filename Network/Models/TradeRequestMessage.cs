@@ -5,7 +5,7 @@ namespace MazeWars.GameServer.Network.Models;
 /// <summary>
 /// Trade request message from client to server.
 /// </summary>
-[MessagePackObject]
+[MessagePackObject(keyAsPropertyName: false)]
 public class TradeRequestMessage
 {
     [Key(0)]

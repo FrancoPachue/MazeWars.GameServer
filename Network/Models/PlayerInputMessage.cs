@@ -4,7 +4,7 @@ using MessagePack;
 namespace MazeWars.GameServer.Network.Models;
 
 // Input Messages (Client → Server)
-[MessagePackObject]
+[MessagePackObject(keyAsPropertyName: false)]
 public class PlayerInputMessage
 {
     // ⭐ SYNC CRITICAL: Sequence number for input ordering
