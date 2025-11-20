@@ -173,44 +173,149 @@ public class UdpNetworkService : IDisposable
     // =============================================
 
     /// <summary>
-    /// Deserializes message.Data (pre-serialized MessagePack bytes) to specific type T.
-    /// Following MessagePack spec where Data contains pre-serialized bytes.
+    /// Converts message.Data (deserialized as object array by MessagePack) to specific type T.
+    /// MessagePack automatically deserializes Data as object[] when using array format.
     /// </summary>
-    private T? ConvertMessageData<T>(byte[] data) where T : class
+    private T? ConvertMessageData<T>(object data) where T : class
     {
         try
         {
-            if (data == null || data.Length == 0)
+            if (data == null)
             {
-                _logger.LogWarning("Empty data for type {Type}", typeof(T).Name);
+                _logger.LogWarning("Null data for type {Type}", typeof(T).Name);
                 return null;
             }
 
-            return MessagePackSerializer.Deserialize<T>(data, MessagePackOptions);
+            // MessagePack deserializes Data as object[] for array-format types
+            if (data is not object[] array)
+            {
+                _logger.LogWarning("Expected object[] but got {DataType} for type {Type}",
+                    data.GetType().Name, typeof(T).Name);
+                return null;
+            }
+
+            // Manual mapping from array indices to type properties
+            return MapArrayToType<T>(array);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to deserialize message data to type {Type}", typeof(T).Name);
+            _logger.LogError(ex, "Failed to convert message data to type {Type}", typeof(T).Name);
             return null;
         }
     }
 
     /// <summary>
-    /// Creates a NetworkMessage with pre-serialized data following MessagePack spec.
+    /// Maps object array to strongly-typed objects based on [Key] attribute indices.
     /// </summary>
-    private NetworkMessage CreateNetworkMessage<T>(string type, string playerId, T data) where T : class
+    private T? MapArrayToType<T>(object[] array) where T : class
     {
-        return new NetworkMessage
+        var type = typeof(T);
+
+        if (type == typeof(ClientConnectData) && array.Length >= 4)
         {
-            Type = type,
-            PlayerId = playerId,
-            Data = MessagePackSerializer.Serialize(data, MessagePackOptions),
-            Timestamp = DateTime.UtcNow
-        };
+            return new ClientConnectData
+            {
+                PlayerName = array[0]?.ToString() ?? string.Empty,
+                PlayerClass = array[1]?.ToString() ?? "scout",
+                TeamId = array[2]?.ToString() ?? string.Empty,
+                AuthToken = array[3]?.ToString() ?? string.Empty
+            } as T;
+        }
+
+        if (type == typeof(ReconnectRequestData) && array.Length >= 3)
+        {
+            return new ReconnectRequestData
+            {
+                SessionToken = array[0]?.ToString() ?? string.Empty,
+                PlayerName = array[1]?.ToString() ?? string.Empty,
+                ClientTimestamp = Convert.ToSingle(array[2])
+            } as T;
+        }
+
+        if (type == typeof(PlayerInputMessage) && array.Length >= 9)
+        {
+            return new PlayerInputMessage
+            {
+                SequenceNumber = Convert.ToUInt32(array[0]),
+                AckSequenceNumber = Convert.ToUInt32(array[1]),
+                ClientTimestamp = Convert.ToSingle(array[2]),
+                MoveInput = ParseVector2(array[3]),
+                IsSprinting = Convert.ToBoolean(array[4]),
+                AimDirection = Convert.ToSingle(array[5]),
+                IsAttacking = Convert.ToBoolean(array[6]),
+                AbilityType = array[7]?.ToString() ?? string.Empty,
+                AbilityTarget = ParseVector2(array[8])
+            } as T;
+        }
+
+        if (type == typeof(LootGrabMessage) && array.Length >= 1)
+        {
+            return new LootGrabMessage
+            {
+                LootId = array[0]?.ToString() ?? string.Empty
+            } as T;
+        }
+
+        if (type == typeof(ChatMessage) && array.Length >= 2)
+        {
+            return new ChatMessage
+            {
+                Message = array[0]?.ToString() ?? string.Empty,
+                ChatType = array[1]?.ToString() ?? "team"
+            } as T;
+        }
+
+        if (type == typeof(UseItemMessage) && array.Length >= 3)
+        {
+            return new UseItemMessage
+            {
+                ItemId = array[0]?.ToString() ?? string.Empty,
+                ItemType = array[1]?.ToString() ?? string.Empty,
+                TargetPosition = ParseVector2(array[2])
+            } as T;
+        }
+
+        if (type == typeof(ExtractionMessage) && array.Length >= 2)
+        {
+            return new ExtractionMessage
+            {
+                Action = array[0]?.ToString() ?? string.Empty,
+                ExtractionId = array[1]?.ToString() ?? string.Empty
+            } as T;
+        }
+
+        if (type == typeof(MessageAcknowledgement) && array.Length >= 3)
+        {
+            return new MessageAcknowledgement
+            {
+                MessageId = array[0]?.ToString() ?? string.Empty,
+                Success = Convert.ToBoolean(array[1]),
+                ErrorMessage = array[2]?.ToString() ?? string.Empty
+            } as T;
+        }
+
+        _logger.LogWarning("No mapping defined for type {Type}", type.Name);
+        return null;
     }
 
     /// <summary>
-    /// Creates a NetworkMessage with anonymous object data (will be serialized automatically).
+    /// Helper to parse Vector2 from object array [x, y]
+    /// </summary>
+    private Vector2 ParseVector2(object data)
+    {
+        if (data is object[] arr && arr.Length >= 2)
+        {
+            return new Vector2
+            {
+                X = Convert.ToSingle(arr[0]),
+                Y = Convert.ToSingle(arr[1])
+            };
+        }
+        return new Vector2();
+    }
+
+    /// <summary>
+    /// Creates a NetworkMessage with data that will be serialized by MessagePack automatically.
     /// </summary>
     private NetworkMessage CreateNetworkMessage(string type, string playerId, object data)
     {
@@ -218,7 +323,7 @@ public class UdpNetworkService : IDisposable
         {
             Type = type,
             PlayerId = playerId,
-            Data = MessagePackSerializer.Serialize(data, MessagePackOptions),
+            Data = data,
             Timestamp = DateTime.UtcNow
         };
     }
