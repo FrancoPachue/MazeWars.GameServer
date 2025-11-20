@@ -72,19 +72,85 @@ public class InputProcessor
 
     /// <summary>
     /// Converts message.Data (deserialized as generic object) to specific type T.
-    /// MessagePack deserializes Data as object, so we need to re-serialize and deserialize with the correct type.
+    /// MessagePack deserializes Data as object array, so we need to manually map to the target type.
     /// </summary>
     private T? ConvertMessageData<T>(object data) where T : class
     {
         try
         {
-            // MessagePack deserializes Data as an array of objects for MessagePackObject types
-            // We need to use ContractlessStandardResolver to handle [MessagePackObject] types
-            var options = MessagePackSerializerOptions.Standard
-                .WithResolver(MessagePack.Resolvers.ContractlessStandardResolver.Instance);
+            // MessagePack deserializes Data as Object[] for MessagePackObject types with [Key] attributes
+            if (data is not object[] array)
+            {
+                _logger.LogWarning("Expected Object[] but got {Type}", data?.GetType().Name ?? "null");
+                return null;
+            }
 
-            var bytes = MessagePackSerializer.Serialize(data, options);
-            return MessagePackSerializer.Deserialize<T>(bytes, options);
+            var targetType = typeof(T);
+
+            // Manual mapping from array indices to properties based on [Key(n)] attributes
+            if (targetType == typeof(PlayerInputMessage))
+            {
+                return new PlayerInputMessage
+                {
+                    SequenceNumber = array.Length > 0 && array[0] is uint u0 ? u0 : Convert.ToUInt32(array[0]),
+                    AckSequenceNumber = array.Length > 1 && array[1] is uint u1 ? u1 : Convert.ToUInt32(array[1]),
+                    ClientTimestamp = array.Length > 2 && array[2] is float f2 ? f2 : Convert.ToSingle(array[2]),
+                    MoveInput = array.Length > 3 ? ParseVector2(array[3]) : new Vector2(),
+                    IsSprinting = array.Length > 4 && array[4] is bool b4 && b4,
+                    AimDirection = array.Length > 5 && array[5] is float f5 ? f5 : Convert.ToSingle(array[5]),
+                    IsAttacking = array.Length > 6 && array[6] is bool b6 && b6,
+                    AbilityType = array.Length > 7 ? array[7]?.ToString() ?? string.Empty : string.Empty,
+                    AbilityTarget = array.Length > 8 ? ParseVector2(array[8]) : new Vector2()
+                } as T;
+            }
+            else if (targetType == typeof(LootGrabMessage))
+            {
+                return new LootGrabMessage
+                {
+                    LootId = array.Length > 0 ? array[0]?.ToString() ?? string.Empty : string.Empty
+                } as T;
+            }
+            else if (targetType == typeof(ChatMessage))
+            {
+                return new ChatMessage
+                {
+                    Message = array.Length > 0 ? array[0]?.ToString() ?? string.Empty : string.Empty,
+                    ChatType = array.Length > 1 ? array[1]?.ToString() ?? "team" : "team"
+                } as T;
+            }
+            else if (targetType == typeof(UseItemMessage))
+            {
+                return new UseItemMessage
+                {
+                    ItemId = array.Length > 0 ? array[0]?.ToString() ?? string.Empty : string.Empty,
+                    ItemType = array.Length > 1 ? array[1]?.ToString() ?? string.Empty : string.Empty,
+                    TargetPosition = array.Length > 2 ? ParseVector2(array[2]) : new Vector2()
+                } as T;
+            }
+            else if (targetType == typeof(ExtractionMessage))
+            {
+                return new ExtractionMessage
+                {
+                    Action = array.Length > 0 ? array[0]?.ToString() ?? string.Empty : string.Empty,
+                    ExtractionId = array.Length > 1 ? array[1]?.ToString() ?? string.Empty : string.Empty
+                } as T;
+            }
+            else if (targetType == typeof(TradeRequestMessage))
+            {
+                return new TradeRequestMessage
+                {
+                    TargetPlayerId = array.Length > 0 ? array[0]?.ToString() ?? string.Empty : string.Empty,
+                    OfferedItemIds = array.Length > 1 && array[1] is object[] offered
+                        ? offered.Select(o => o?.ToString() ?? string.Empty).ToList()
+                        : new List<string>(),
+                    RequestedItemIds = array.Length > 2 && array[2] is object[] requested
+                        ? requested.Select(r => r?.ToString() ?? string.Empty).ToList()
+                        : new List<string>()
+                } as T;
+            }
+
+            _logger.LogWarning("No manual mapping defined for type {Type}", targetType.Name);
+            return null;
         }
         catch (Exception ex)
         {
@@ -92,6 +158,20 @@ public class InputProcessor
                 typeof(T).Name, data?.GetType().Name ?? "null");
             return null;
         }
+    }
+
+    /// <summary>
+    /// Helper method to parse Vector2 from object array [x, y]
+    /// </summary>
+    private Vector2 ParseVector2(object data)
+    {
+        if (data is object[] arr && arr.Length >= 2)
+        {
+            float x = arr[0] is float fx ? fx : Convert.ToSingle(arr[0]);
+            float y = arr[1] is float fy ? fy : Convert.ToSingle(arr[1]);
+            return new Vector2 { X = x, Y = y };
+        }
+        return new Vector2();
     }
 
     // =============================================
