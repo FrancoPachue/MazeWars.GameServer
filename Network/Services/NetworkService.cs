@@ -177,7 +177,9 @@ public class UdpNetworkService : IDisposable
                 return null;
             }
 
-            return MessagePackSerializer.Deserialize<T>(data);
+            // Use Standard options which includes resolver for [MessagePackObject] types
+            var options = MessagePackSerializerOptions.Standard;
+            return MessagePackSerializer.Deserialize<T>(data, options);
         }
         catch (Exception ex)
         {
@@ -191,11 +193,12 @@ public class UdpNetworkService : IDisposable
     /// </summary>
     private NetworkMessage CreateNetworkMessage<T>(string type, string playerId, T data) where T : class
     {
+        var options = MessagePackSerializerOptions.Standard;
         return new NetworkMessage
         {
             Type = type,
             PlayerId = playerId,
-            Data = MessagePackSerializer.Serialize(data),
+            Data = MessagePackSerializer.Serialize(data, options),
             Timestamp = DateTime.UtcNow
         };
     }
@@ -205,11 +208,12 @@ public class UdpNetworkService : IDisposable
     /// </summary>
     private NetworkMessage CreateNetworkMessage(string type, string playerId, object data)
     {
+        var options = MessagePackSerializerOptions.Standard;
         return new NetworkMessage
         {
             Type = type,
             PlayerId = playerId,
-            Data = MessagePackSerializer.Serialize(data),
+            Data = MessagePackSerializer.Serialize(data, options),
             Timestamp = DateTime.UtcNow
         };
     }
