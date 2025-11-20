@@ -172,13 +172,15 @@ public class UdpNetworkService : IDisposable
         try
         {
             // MessagePack deserializes Data as an array of objects for MessagePackObject types
-            // We need to re-serialize and deserialize with the correct type
-            var bytes = MessagePackSerializer.Serialize(data);
-            return MessagePackSerializer.Deserialize<T>(bytes);
+            // We need to re-serialize and deserialize with the correct type using Standard resolver
+            var options = MessagePackSerializerOptions.Standard;
+            var bytes = MessagePackSerializer.Serialize(data, options);
+            return MessagePackSerializer.Deserialize<T>(bytes, options);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to convert message data to type {Type}", typeof(T).Name);
+            _logger.LogError(ex, "Failed to convert message data to type {Type}. Data type: {DataType}",
+                typeof(T).Name, data?.GetType().Name ?? "null");
             return null;
         }
     }
@@ -450,6 +452,12 @@ public class UdpNetworkService : IDisposable
     {
         try
         {
+            // DEBUG: Log the type and content of message.Data
+            _logger.LogInformation("DEBUG: message.Data type: {DataType}, IsArray: {IsArray}, Content: {Content}",
+                message.Data?.GetType().FullName ?? "null",
+                message.Data?.GetType().IsArray ?? false,
+                message.Data is object[] arr ? $"Array[{arr.Length}]: [{string.Join(", ", arr)}]" : message.Data?.ToString() ?? "null");
+
             // Convert message.Data to ClientConnectData
             var connectData = ConvertMessageData<ClientConnectData>(message.Data);
             if (connectData == null)
