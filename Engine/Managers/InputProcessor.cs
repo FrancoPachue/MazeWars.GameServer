@@ -84,9 +84,9 @@ public class InputProcessor
                 return null;
             }
 
-            // Use ContractlessStandardResolver for [MessagePackObject] types
+            // Use StandardResolverAllowPrivate which handles array format [Key] attributes
             var options = MessagePackSerializerOptions.Standard
-                .WithResolver(MessagePack.Resolvers.ContractlessStandardResolver.Instance);
+                .WithResolver(MessagePack.Resolvers.StandardResolverAllowPrivate.Instance);
             return MessagePackSerializer.Deserialize<T>(data, options);
         }
         catch (Exception ex)
