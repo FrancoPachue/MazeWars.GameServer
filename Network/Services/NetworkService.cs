@@ -447,7 +447,6 @@ public class UdpNetworkService : IDisposable
             }
 
             // ⭐ MESSAGEPACK: Deserialize incoming messages with MessagePack for consistency
-            // Try standard (array format) first, then fallback to ContractlessStandardResolver for compatibility
             NetworkMessage? networkMessage;
             try
             {
@@ -455,29 +454,30 @@ public class UdpNetworkService : IDisposable
             }
             catch (MessagePackSerializationException ex)
             {
-                // Try alternative deserialization with ContractlessStandardResolver for backward compatibility
+                // Log diagnostic information to understand what the client is sending
+                var hexDump = BitConverter.ToString(messageData.Take(Math.Min(100, messageData.Length)).ToArray());
+
+                // Try to decode as dynamic object to see the structure
+                string dynamicStructure = "Unable to parse";
                 try
                 {
-                    var options = MessagePackSerializerOptions.Standard
+                    var dynamicOptions = MessagePackSerializerOptions.Standard
                         .WithResolver(MessagePack.Resolvers.ContractlessStandardResolver.Instance);
-                    networkMessage = MessagePackSerializer.Deserialize<NetworkMessage>(messageData, options);
+                    var dynamicObj = MessagePackSerializer.Deserialize<dynamic>(messageData, dynamicOptions);
+                    dynamicStructure = System.Text.Json.JsonSerializer.Serialize(dynamicObj, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                }
+                catch { }
 
-                    _logger.LogWarning("Client {EndPoint} is using old message format (map format). " +
-                        "Please update client to use array format with keyAsPropertyName: false",
-                        clientEndPoint);
-                }
-                catch (Exception fallbackEx)
-                {
-                    // Log diagnostic information
-                    var hexDump = BitConverter.ToString(messageData.Take(Math.Min(50, messageData.Length)).ToArray());
-                    _logger.LogError(ex,
-                        "MessagePack deserialization failed from {EndPoint}. " +
-                        "Message size: {Size} bytes. First 50 bytes (hex): {HexDump}. " +
-                        "Fallback error: {FallbackError}",
-                        clientEndPoint, messageData.Length, hexDump, fallbackEx.Message);
-                    await SendErrorToClient(clientEndPoint, "Invalid message format - serialization mismatch");
-                    return;
-                }
+                _logger.LogError(ex,
+                    "❌ MessagePack deserialization FAILED from {EndPoint}\n" +
+                    "Message size: {Size} bytes\n" +
+                    "Hex dump (first 100 bytes): {HexDump}\n" +
+                    "Dynamic parse attempt:\n{DynamicStructure}\n" +
+                    "Expected structure: NetworkMessage with [Key(0)]=Type (string), [Key(1)]=PlayerId (string), [Key(2)]=Data (object), [Key(3)]=Timestamp (DateTime)",
+                    clientEndPoint, messageData.Length, hexDump, dynamicStructure);
+
+                await SendErrorToClient(clientEndPoint, "Invalid message format - serialization mismatch");
+                return;
             }
 
             if (networkMessage == null)
