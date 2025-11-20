@@ -1145,6 +1145,8 @@ public class RealTimeGameEngine
 
             var playerUpdate = pools.PlayerStateUpdates.Rent();
             playerUpdate.PlayerId = p.PlayerId;
+            playerUpdate.PlayerName = p.PlayerName;
+            playerUpdate.PlayerClass = p.PlayerClass;
             playerUpdate.Position = p.Position;
             playerUpdate.Velocity = p.Velocity;
             playerUpdate.Direction = p.Direction;

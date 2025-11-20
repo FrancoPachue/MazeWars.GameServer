@@ -32,4 +32,10 @@ public class PlayerStateUpdate
 
     [Key(8)]
     public bool IsCasting { get; set; }
+
+    [Key(9)]
+    public string PlayerName { get; set; } = string.Empty;
+
+    [Key(10)]
+    public string PlayerClass { get; set; } = string.Empty;
 }
