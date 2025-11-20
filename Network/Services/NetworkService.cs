@@ -426,8 +426,8 @@ public class UdpNetworkService : IDisposable
     {
         try
         {
-            // ⭐ MESSAGEPACK: Deserialize from byte[]
-            var connectData = MessagePackSerializer.Deserialize<ClientConnectData>(message.Data);
+            // MessagePack deserializes Data as object automatically
+            var connectData = message.Data as ClientConnectData;
             if (connectData == null)
             {
                 await SendErrorToClient(clientEndPoint, "Invalid connect data");
@@ -532,8 +532,8 @@ public class UdpNetworkService : IDisposable
     {
         try
         {
-            // ⭐ MESSAGEPACK: Deserialize from byte[]
-            var reconnectData = MessagePackSerializer.Deserialize<ReconnectRequestData>(message.Data);
+            // MessagePack deserializes Data as object automatically
+            var reconnectData = message.Data as ReconnectRequestData;
             if (reconnectData == null)
             {
                 await SendErrorToClient(clientEndPoint, "Invalid reconnect data");
@@ -881,8 +881,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            // ⭐ MESSAGEPACK: Deserialize from byte[]
-            var inputData = MessagePackSerializer.Deserialize<PlayerInputMessage>(message.Data);
+            // MessagePack deserializes Data as object automatically
+            var inputData = message.Data as PlayerInputMessage;
             if (inputData == null) return;
 
             if (inputData.MoveInput.Magnitude > 1.1f)
@@ -894,8 +894,7 @@ public class UdpNetworkService : IDisposable
             }
 
             message.PlayerId = client.Player.PlayerId;
-            // No need to reassign Data - InputProcessor will deserialize from the original bytes
-
+            // Data is already deserialized as object by MessagePack
             _gameEngine.QueueInput(message);
 
             client.LastActivity = DateTime.UtcNow;
@@ -913,8 +912,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            // ⭐ MESSAGEPACK: Deserialize from byte[]
-            var lootGrab = MessagePackSerializer.Deserialize<LootGrabMessage>(message.Data);
+            // MessagePack deserializes Data as object automatically
+            var lootGrab = message.Data as LootGrabMessage;
             if (lootGrab == null || string.IsNullOrWhiteSpace(lootGrab.LootId))
             {
                 await SendErrorToClient(clientEndPoint, "Invalid loot grab data");
@@ -922,7 +921,7 @@ public class UdpNetworkService : IDisposable
             }
 
             message.PlayerId = client.Player.PlayerId;
-            // No need to reassign Data - InputProcessor will deserialize from the original bytes
+            // Data is already deserialized as object by MessagePack
             _gameEngine.QueueInput(message);
             client.LastActivity = DateTime.UtcNow;
         }
@@ -939,8 +938,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            // ⭐ MESSAGEPACK: Deserialize from byte[]
-            var chatData = MessagePackSerializer.Deserialize<ChatMessage>(message.Data);
+            // MessagePack deserializes Data as object automatically
+            var chatData = message.Data as ChatMessage;
             if (chatData == null || string.IsNullOrWhiteSpace(chatData.Message))
                 return;
 
@@ -980,8 +979,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            // ⭐ MESSAGEPACK: Deserialize from byte[]
-            var useItemData = MessagePackSerializer.Deserialize<UseItemMessage>(message.Data);
+            // MessagePack deserializes Data as object automatically
+            var useItemData = message.Data as UseItemMessage;
             if (useItemData == null || string.IsNullOrWhiteSpace(useItemData.ItemId))
             {
                 await SendErrorToClient(clientEndPoint, "Invalid use item data");
@@ -989,7 +988,7 @@ public class UdpNetworkService : IDisposable
             }
 
             message.PlayerId = client.Player.PlayerId;
-            // No need to reassign Data - InputProcessor will deserialize from the original bytes
+            // Data is already deserialized as object by MessagePack
             _gameEngine.QueueInput(message);
 
             client.LastActivity = DateTime.UtcNow;
@@ -1007,8 +1006,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            // ⭐ MESSAGEPACK: Deserialize from byte[]
-            var extractionData = MessagePackSerializer.Deserialize<ExtractionMessage>(message.Data);
+            // MessagePack deserializes Data as object automatically
+            var extractionData = message.Data as ExtractionMessage;
             if (extractionData == null || string.IsNullOrWhiteSpace(extractionData.Action))
             {
                 await SendErrorToClient(clientEndPoint, "Invalid extraction data");
@@ -1023,7 +1022,7 @@ public class UdpNetworkService : IDisposable
             }
 
             message.PlayerId = client.Player.PlayerId;
-            // No need to reassign Data - InputProcessor will deserialize from the original bytes
+            // Data is already deserialized as object by MessagePack
             _gameEngine.QueueInput(message);
 
             client.LastActivity = DateTime.UtcNow;
