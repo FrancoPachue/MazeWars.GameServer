@@ -447,7 +447,39 @@ public class UdpNetworkService : IDisposable
             }
 
             // ⭐ MESSAGEPACK: Deserialize incoming messages with MessagePack for consistency
-            var networkMessage = MessagePackSerializer.Deserialize<NetworkMessage>(messageData);
+            // Try standard (array format) first, then fallback to ContractlessStandardResolver for compatibility
+            NetworkMessage? networkMessage;
+            try
+            {
+                networkMessage = MessagePackSerializer.Deserialize<NetworkMessage>(messageData);
+            }
+            catch (MessagePackSerializationException ex)
+            {
+                // Try alternative deserialization with ContractlessStandardResolver for backward compatibility
+                try
+                {
+                    var options = MessagePackSerializerOptions.Standard
+                        .WithResolver(MessagePack.Resolvers.ContractlessStandardResolver.Instance);
+                    networkMessage = MessagePackSerializer.Deserialize<NetworkMessage>(messageData, options);
+
+                    _logger.LogWarning("Client {EndPoint} is using old message format (map format). " +
+                        "Please update client to use array format with keyAsPropertyName: false",
+                        clientEndPoint);
+                }
+                catch (Exception fallbackEx)
+                {
+                    // Log diagnostic information
+                    var hexDump = BitConverter.ToString(messageData.Take(Math.Min(50, messageData.Length)).ToArray());
+                    _logger.LogError(ex,
+                        "MessagePack deserialization failed from {EndPoint}. " +
+                        "Message size: {Size} bytes. First 50 bytes (hex): {HexDump}. " +
+                        "Fallback error: {FallbackError}",
+                        clientEndPoint, messageData.Length, hexDump, fallbackEx.Message);
+                    await SendErrorToClient(clientEndPoint, "Invalid message format - serialization mismatch");
+                    return;
+                }
+            }
+
             if (networkMessage == null)
             {
                 _logger.LogWarning("Failed to deserialize message from {EndPoint}", clientEndPoint);
