@@ -172,8 +172,10 @@ public class UdpNetworkService : IDisposable
         try
         {
             // MessagePack deserializes Data as an array of objects for MessagePackObject types
-            // We need to re-serialize and deserialize with the correct type using Standard resolver
-            var options = MessagePackSerializerOptions.Standard;
+            // We need to use ContractlessStandardResolver to handle [MessagePackObject] types
+            var options = MessagePackSerializerOptions.Standard
+                .WithResolver(MessagePack.Resolvers.ContractlessStandardResolver.Instance);
+
             var bytes = MessagePackSerializer.Serialize(data, options);
             return MessagePackSerializer.Deserialize<T>(bytes, options);
         }
