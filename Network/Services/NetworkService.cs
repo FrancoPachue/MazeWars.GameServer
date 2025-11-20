@@ -286,16 +286,17 @@ public class UdpNetworkService : IDisposable
                 return;
             }
 
-            var messageJson = Encoding.UTF8.GetString(messageData);
-            _logger.LogDebug("Received from {EndPoint}: {Message}", clientEndPoint, messageJson);
-
-            var networkMessage = JsonConvert.DeserializeObject<NetworkMessage>(messageJson);
+            // ⭐ MESSAGEPACK: Deserialize incoming messages with MessagePack for consistency
+            var networkMessage = MessagePackSerializer.Deserialize<NetworkMessage>(messageData);
             if (networkMessage == null)
             {
                 _logger.LogWarning("Failed to deserialize message from {EndPoint}", clientEndPoint);
                 await SendErrorToClient(clientEndPoint, "Invalid message format");
                 return;
             }
+
+            _logger.LogDebug("Received {Type} from {EndPoint} (PlayerId: {PlayerId})",
+                networkMessage.Type, clientEndPoint, networkMessage.PlayerId);
 
             // Validate message size
             if (messageData.Length > _settings.NetworkSettings.MaxPacketSize)
@@ -425,7 +426,8 @@ public class UdpNetworkService : IDisposable
     {
         try
         {
-            var connectData = JsonConvert.DeserializeObject<ClientConnectData>(message.Data.ToString()!);
+            // MessagePack deserializes Data as object automatically
+            var connectData = message.Data as ClientConnectData;
             if (connectData == null)
             {
                 await SendErrorToClient(clientEndPoint, "Invalid connect data");
@@ -530,7 +532,8 @@ public class UdpNetworkService : IDisposable
     {
         try
         {
-            var reconnectData = JsonConvert.DeserializeObject<ReconnectRequestData>(message.Data.ToString()!);
+            // MessagePack deserializes Data as object automatically
+            var reconnectData = message.Data as ReconnectRequestData;
             if (reconnectData == null)
             {
                 await SendErrorToClient(clientEndPoint, "Invalid reconnect data");
@@ -878,7 +881,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            var inputData = JsonConvert.DeserializeObject<PlayerInputMessage>(message.Data.ToString()!);
+            // MessagePack deserializes Data as object automatically
+            var inputData = message.Data as PlayerInputMessage;
             if (inputData == null) return;
 
             if (inputData.MoveInput.Magnitude > 1.1f)
@@ -890,8 +894,7 @@ public class UdpNetworkService : IDisposable
             }
 
             message.PlayerId = client.Player.PlayerId;
-            message.Data = inputData;
-
+            // Data is already deserialized as object by MessagePack
             _gameEngine.QueueInput(message);
 
             client.LastActivity = DateTime.UtcNow;
@@ -909,7 +912,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            var lootGrab = JsonConvert.DeserializeObject<LootGrabMessage>(message.Data.ToString()!);
+            // MessagePack deserializes Data as object automatically
+            var lootGrab = message.Data as LootGrabMessage;
             if (lootGrab == null || string.IsNullOrWhiteSpace(lootGrab.LootId))
             {
                 await SendErrorToClient(clientEndPoint, "Invalid loot grab data");
@@ -917,7 +921,7 @@ public class UdpNetworkService : IDisposable
             }
 
             message.PlayerId = client.Player.PlayerId;
-            message.Data = lootGrab;
+            // Data is already deserialized as object by MessagePack
             _gameEngine.QueueInput(message);
             client.LastActivity = DateTime.UtcNow;
         }
@@ -934,7 +938,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            var chatData = JsonConvert.DeserializeObject<ChatMessage>(message.Data.ToString()!);
+            // MessagePack deserializes Data as object automatically
+            var chatData = message.Data as ChatMessage;
             if (chatData == null || string.IsNullOrWhiteSpace(chatData.Message))
                 return;
 
@@ -974,7 +979,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            var useItemData = JsonConvert.DeserializeObject<UseItemMessage>(message.Data.ToString()!);
+            // MessagePack deserializes Data as object automatically
+            var useItemData = message.Data as UseItemMessage;
             if (useItemData == null || string.IsNullOrWhiteSpace(useItemData.ItemId))
             {
                 await SendErrorToClient(clientEndPoint, "Invalid use item data");
@@ -982,7 +988,7 @@ public class UdpNetworkService : IDisposable
             }
 
             message.PlayerId = client.Player.PlayerId;
-            message.Data = useItemData;
+            // Data is already deserialized as object by MessagePack
             _gameEngine.QueueInput(message);
 
             client.LastActivity = DateTime.UtcNow;
@@ -1000,7 +1006,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            var extractionData = JsonConvert.DeserializeObject<ExtractionMessage>(message.Data.ToString()!);
+            // MessagePack deserializes Data as object automatically
+            var extractionData = message.Data as ExtractionMessage;
             if (extractionData == null || string.IsNullOrWhiteSpace(extractionData.Action))
             {
                 await SendErrorToClient(clientEndPoint, "Invalid extraction data");
@@ -1015,7 +1022,7 @@ public class UdpNetworkService : IDisposable
             }
 
             message.PlayerId = client.Player.PlayerId;
-            message.Data = extractionData;
+            // Data is already deserialized as object by MessagePack
             _gameEngine.QueueInput(message);
 
             client.LastActivity = DateTime.UtcNow;

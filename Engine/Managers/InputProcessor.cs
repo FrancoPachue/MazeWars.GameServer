@@ -189,6 +189,7 @@ public class InputProcessor
     /// </summary>
     private void HandlePlayerInput(RealTimePlayer player, NetworkMessage input)
     {
+        // MessagePack deserializes Data as object automatically
         var playerInput = input.Data as PlayerInputMessage;
         if (playerInput == null)
         {
@@ -211,6 +212,7 @@ public class InputProcessor
     /// </summary>
     private void HandleLootGrab(RealTimePlayer player, NetworkMessage input)
     {
+        // MessagePack deserializes Data as object automatically
         var lootGrab = input.Data as LootGrabMessage;
         if (lootGrab == null)
         {
@@ -226,6 +228,7 @@ public class InputProcessor
     /// </summary>
     private void HandleChat(RealTimePlayer player, NetworkMessage input)
     {
+        // MessagePack deserializes Data as object automatically
         var chat = input.Data as ChatMessage;
         if (chat == null)
         {
@@ -241,6 +244,7 @@ public class InputProcessor
     /// </summary>
     private void HandleUseItem(RealTimePlayer player, NetworkMessage input)
     {
+        // MessagePack deserializes Data as object automatically
         var useItem = input.Data as UseItemMessage;
         if (useItem == null)
         {
@@ -256,6 +260,7 @@ public class InputProcessor
     /// </summary>
     private void HandleExtraction(RealTimePlayer player, NetworkMessage input)
     {
+        // MessagePack deserializes Data as object automatically
         var extraction = input.Data as ExtractionMessage;
         if (extraction == null)
         {
@@ -271,6 +276,7 @@ public class InputProcessor
     /// </summary>
     private void HandleTradeRequest(RealTimePlayer player, NetworkMessage input)
     {
+        // MessagePack deserializes Data as object automatically
         var tradeRequest = input.Data as TradeRequestMessage;
         if (tradeRequest == null)
         {

@@ -4,6 +4,7 @@ namespace MazeWars.GameServer.Network.Models;
 
 /// <summary>
 /// Base network message with MessagePack serialization support.
+/// Data uses object type for client compatibility.
 /// </summary>
 [MessagePackObject]
 public class NetworkMessage

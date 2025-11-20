@@ -31,6 +31,8 @@ public class NetworkObjectPools
             resetAction: (obj) =>
             {
                 obj.PlayerId = string.Empty;
+                obj.PlayerName = string.Empty;
+                obj.PlayerClass = string.Empty;
                 obj.Position = default;
                 obj.Velocity = default;
                 obj.Direction = default;
