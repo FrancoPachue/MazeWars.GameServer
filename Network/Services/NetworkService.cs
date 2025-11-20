@@ -1058,7 +1058,7 @@ public class UdpNetworkService : IDisposable
     {
         try
         {
-            var ack = JsonConvert.DeserializeObject<MessageAcknowledgement>(message.Data.ToString()!);
+            var ack = ConvertMessageData<MessageAcknowledgement>(message.Data);
             if (ack == null || string.IsNullOrWhiteSpace(ack.MessageId)) return;
 
             if (_pendingAcks.TryRemove(ack.MessageId, out var originalMessage))
