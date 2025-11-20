@@ -177,8 +177,9 @@ public class UdpNetworkService : IDisposable
                 return null;
             }
 
-            // Use Standard options which includes resolver for [MessagePackObject] types
-            var options = MessagePackSerializerOptions.Standard;
+            // Use ContractlessStandardResolver for [MessagePackObject] types
+            var options = MessagePackSerializerOptions.Standard
+                .WithResolver(MessagePack.Resolvers.ContractlessStandardResolver.Instance);
             return MessagePackSerializer.Deserialize<T>(data, options);
         }
         catch (Exception ex)
@@ -193,7 +194,8 @@ public class UdpNetworkService : IDisposable
     /// </summary>
     private NetworkMessage CreateNetworkMessage<T>(string type, string playerId, T data) where T : class
     {
-        var options = MessagePackSerializerOptions.Standard;
+        var options = MessagePackSerializerOptions.Standard
+            .WithResolver(MessagePack.Resolvers.ContractlessStandardResolver.Instance);
         return new NetworkMessage
         {
             Type = type,
@@ -208,7 +210,8 @@ public class UdpNetworkService : IDisposable
     /// </summary>
     private NetworkMessage CreateNetworkMessage(string type, string playerId, object data)
     {
-        var options = MessagePackSerializerOptions.Standard;
+        var options = MessagePackSerializerOptions.Standard
+            .WithResolver(MessagePack.Resolvers.ContractlessStandardResolver.Instance);
         return new NetworkMessage
         {
             Type = type,
