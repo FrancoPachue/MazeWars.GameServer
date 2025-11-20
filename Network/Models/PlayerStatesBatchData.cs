@@ -16,4 +16,11 @@ public class PlayerStatesBatchData
 
     [Key(2)]
     public int TotalBatches { get; set; }
+
+    /// <summary>
+    /// Input acknowledgments for client-side prediction reconciliation.
+    /// Maps PlayerId -> Last Acknowledged Sequence Number
+    /// </summary>
+    [Key(3)]
+    public Dictionary<string, uint> AcknowledgedInputs { get; set; } = new();
 }

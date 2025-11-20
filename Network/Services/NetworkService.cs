@@ -1393,12 +1393,16 @@ public class UdpNetworkService : IDisposable
                     CurrentRoomId = p.CurrentRoomId
                 }).ToList();
 
+                // ⭐ INPUT ACKNOWLEDGMENT: Get acknowledged sequences for client reconciliation
+                var acknowledgedInputs = _gameEngine.GetAcknowledgedInputs(batch);
+
                 var message = CreateNetworkMessage("player_states_batch", string.Empty,
                     new PlayerStatesBatchData
                     {
                         Players = playerUpdates,
                         BatchIndex = i / maxPlayersPerBatch,
-                        TotalBatches = (players.Count + maxPlayersPerBatch - 1) / maxPlayersPerBatch
+                        TotalBatches = (players.Count + maxPlayersPerBatch - 1) / maxPlayersPerBatch,
+                        AcknowledgedInputs = acknowledgedInputs
                     });
 
                 foreach (var client in worldGroup)

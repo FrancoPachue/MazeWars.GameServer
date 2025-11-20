@@ -1680,6 +1680,24 @@ public class RealTimeGameEngine
         return _movementSystem.GetCurrentMovementSettings();
     }
 
+    /// <summary>
+    /// Get acknowledged input sequences for a list of players.
+    /// Used by NetworkService to send acknowledgments back to clients for input reconciliation.
+    /// </summary>
+    public Dictionary<string, uint> GetAcknowledgedInputs(IEnumerable<RealTimePlayer> players)
+    {
+        var acknowledgedInputs = new Dictionary<string, uint>();
+        foreach (var player in players)
+        {
+            var ackSeq = _inputProcessor.GetLastAcknowledgedSequence(player.PlayerId);
+            if (ackSeq > 0)
+            {
+                acknowledgedInputs[player.PlayerId] = ackSeq;
+            }
+        }
+        return acknowledgedInputs;
+    }
+
     // =============================================
     // ⭐ NUEVO: MÉTODO INTEGRADO DE ESTADÍSTICAS CON AI
     // =============================================
