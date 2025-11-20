@@ -12,6 +12,15 @@ namespace MazeWars.GameServer.Engine.Managers;
 /// </summary>
 public class InputProcessor
 {
+    // MessagePack resolver configuration
+    private static readonly MessagePackSerializerOptions MessagePackOptions = MessagePackSerializerOptions.Standard
+        .WithResolver(MessagePack.Resolvers.CompositeResolver.Create(
+            // Try to resolve with attribute-based formatters first (handles [MessagePackObject])
+            MessagePack.Resolvers.StandardResolver.Instance,
+            // Then try contractless (handles types without attributes)
+            MessagePack.Resolvers.ContractlessStandardResolver.Instance
+        ));
+
     private readonly ILogger<InputProcessor> _logger;
     private readonly ConcurrentQueue<NetworkMessage> _inputQueue = new();
     private readonly InputBuffer _inputBuffer;
@@ -84,10 +93,7 @@ public class InputProcessor
                 return null;
             }
 
-            // Use StandardResolverAllowPrivate which handles array format [Key] attributes
-            var options = MessagePackSerializerOptions.Standard
-                .WithResolver(MessagePack.Resolvers.StandardResolverAllowPrivate.Instance);
-            return MessagePackSerializer.Deserialize<T>(data, options);
+            return MessagePackSerializer.Deserialize<T>(data, MessagePackOptions);
         }
         catch (Exception ex)
         {

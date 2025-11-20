@@ -19,6 +19,15 @@ namespace MazeWars.GameServer.Network.Services;
 
 public class UdpNetworkService : IDisposable
 {
+    // MessagePack resolver configuration
+    private static readonly MessagePackSerializerOptions MessagePackOptions = MessagePackSerializerOptions.Standard
+        .WithResolver(MessagePack.Resolvers.CompositeResolver.Create(
+            // Try to resolve with attribute-based formatters first (handles [MessagePackObject])
+            MessagePack.Resolvers.StandardResolver.Instance,
+            // Then try contractless (handles types without attributes)
+            MessagePack.Resolvers.ContractlessStandardResolver.Instance
+        ));
+
     private readonly ILogger<UdpNetworkService> _logger;
     private readonly GameServerSettings _settings;
     private readonly RealTimeGameEngine _gameEngine;
@@ -177,10 +186,7 @@ public class UdpNetworkService : IDisposable
                 return null;
             }
 
-            // Use StandardResolverAllowPrivate which handles array format [Key] attributes
-            var options = MessagePackSerializerOptions.Standard
-                .WithResolver(MessagePack.Resolvers.StandardResolverAllowPrivate.Instance);
-            return MessagePackSerializer.Deserialize<T>(data, options);
+            return MessagePackSerializer.Deserialize<T>(data, MessagePackOptions);
         }
         catch (Exception ex)
         {
@@ -194,13 +200,11 @@ public class UdpNetworkService : IDisposable
     /// </summary>
     private NetworkMessage CreateNetworkMessage<T>(string type, string playerId, T data) where T : class
     {
-        var options = MessagePackSerializerOptions.Standard
-            .WithResolver(MessagePack.Resolvers.StandardResolverAllowPrivate.Instance);
         return new NetworkMessage
         {
             Type = type,
             PlayerId = playerId,
-            Data = MessagePackSerializer.Serialize(data, options),
+            Data = MessagePackSerializer.Serialize(data, MessagePackOptions),
             Timestamp = DateTime.UtcNow
         };
     }
@@ -210,13 +214,11 @@ public class UdpNetworkService : IDisposable
     /// </summary>
     private NetworkMessage CreateNetworkMessage(string type, string playerId, object data)
     {
-        var options = MessagePackSerializerOptions.Standard
-            .WithResolver(MessagePack.Resolvers.StandardResolverAllowPrivate.Instance);
         return new NetworkMessage
         {
             Type = type,
             PlayerId = playerId,
-            Data = MessagePackSerializer.Serialize(data, options),
+            Data = MessagePackSerializer.Serialize(data, MessagePackOptions),
             Timestamp = DateTime.UtcNow
         };
     }
