@@ -476,12 +476,6 @@ public class UdpNetworkService : IDisposable
     {
         try
         {
-            // DEBUG: Log the type and content of message.Data
-            _logger.LogInformation("DEBUG: message.Data type: {DataType}, IsArray: {IsArray}, Content: {Content}",
-                message.Data?.GetType().FullName ?? "null",
-                message.Data?.GetType().IsArray ?? false,
-                message.Data is object[] arr ? $"Array[{arr.Length}]: [{string.Join(", ", arr)}]" : message.Data?.ToString() ?? "null");
-
             // Convert message.Data to ClientConnectData
             var connectData = ConvertMessageData<ClientConnectData>(message.Data);
             if (connectData == null)
@@ -1051,21 +1045,12 @@ public class UdpNetworkService : IDisposable
     private async Task HandlePing(IPEndPoint clientEndPoint, NetworkMessage message)
     {
         var timestamp = DateTime.UtcNow;
-        double latency = 0;
 
-        if (message.Data is JObject dataObj && dataObj["RequestTime"] != null)
-        {
-            if (DateTime.TryParse(dataObj["RequestTime"].ToString(), out DateTime requestTime))
-            {
-                latency = (timestamp - requestTime).TotalMilliseconds;
-            }
-        }
-
+        // Simply echo back the client's ping data along with server timestamp
         await SendAsync(clientEndPoint, CreateNetworkMessage("pong", message.PlayerId, new
         {
-            RequestTime = message.Data,
-            ServerTime = timestamp,
-            Latency = latency
+            ClientData = message.Data, // Echo back client's ping data
+            ServerTime = timestamp
         }));
     }
 
