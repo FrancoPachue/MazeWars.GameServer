@@ -19,15 +19,6 @@ namespace MazeWars.GameServer.Network.Services;
 
 public class UdpNetworkService : IDisposable
 {
-    // MessagePack resolver configuration
-    private static readonly MessagePackSerializerOptions MessagePackOptions = MessagePackSerializerOptions.Standard
-        .WithResolver(MessagePack.Resolvers.CompositeResolver.Create(
-            // Try to resolve with attribute-based formatters first (handles [MessagePackObject])
-            MessagePack.Resolvers.StandardResolver.Instance,
-            // Then try contractless (handles types without attributes)
-            MessagePack.Resolvers.ContractlessStandardResolver.Instance
-        ));
-
     private readonly ILogger<UdpNetworkService> _logger;
     private readonly GameServerSettings _settings;
     private readonly RealTimeGameEngine _gameEngine;
