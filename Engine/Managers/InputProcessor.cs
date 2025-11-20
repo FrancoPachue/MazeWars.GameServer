@@ -1,6 +1,7 @@
 using MazeWars.GameServer.Engine.Network;
 using MazeWars.GameServer.Models;
 using MazeWars.GameServer.Network.Models;
+using MessagePack;
 using System.Collections.Concurrent;
 
 namespace MazeWars.GameServer.Engine.Managers;
@@ -63,6 +64,30 @@ public class InputProcessor
         _inputBuffer = new InputBuffer(logger);
 
         _logger.LogInformation("InputProcessor initialized with InputBuffer for UDP packet reordering");
+    }
+
+    // =============================================
+    // MESSAGE DATA DESERIALIZATION HELPER
+    // =============================================
+
+    /// <summary>
+    /// Converts message.Data (deserialized as generic object) to specific type T.
+    /// MessagePack deserializes Data as object, so we need to re-serialize and deserialize with the correct type.
+    /// </summary>
+    private T? ConvertMessageData<T>(object data) where T : class
+    {
+        try
+        {
+            // MessagePack deserializes Data as an array of objects for MessagePackObject types
+            // We need to re-serialize and deserialize with the correct type
+            var bytes = MessagePackSerializer.Serialize(data);
+            return MessagePackSerializer.Deserialize<T>(bytes);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to convert message data to type {Type}", typeof(T).Name);
+            return null;
+        }
     }
 
     // =============================================
@@ -189,8 +214,8 @@ public class InputProcessor
     /// </summary>
     private void HandlePlayerInput(RealTimePlayer player, NetworkMessage input)
     {
-        // MessagePack deserializes Data as object automatically
-        var playerInput = input.Data as PlayerInputMessage;
+        // Convert message.Data to PlayerInputMessage
+        var playerInput = ConvertMessageData<PlayerInputMessage>(input.Data);
         if (playerInput == null)
         {
             _logger.LogWarning("Invalid player input data from {PlayerId}", player.PlayerId);
@@ -212,8 +237,8 @@ public class InputProcessor
     /// </summary>
     private void HandleLootGrab(RealTimePlayer player, NetworkMessage input)
     {
-        // MessagePack deserializes Data as object automatically
-        var lootGrab = input.Data as LootGrabMessage;
+        // Convert message.Data to LootGrabMessage
+        var lootGrab = ConvertMessageData<LootGrabMessage>(input.Data);
         if (lootGrab == null)
         {
             _logger.LogWarning("Invalid loot grab data from {PlayerId}", player.PlayerId);
@@ -228,8 +253,8 @@ public class InputProcessor
     /// </summary>
     private void HandleChat(RealTimePlayer player, NetworkMessage input)
     {
-        // MessagePack deserializes Data as object automatically
-        var chat = input.Data as ChatMessage;
+        // Convert message.Data to ChatMessage
+        var chat = ConvertMessageData<ChatMessage>(input.Data);
         if (chat == null)
         {
             _logger.LogWarning("Invalid chat data from {PlayerId}", player.PlayerId);
@@ -244,8 +269,8 @@ public class InputProcessor
     /// </summary>
     private void HandleUseItem(RealTimePlayer player, NetworkMessage input)
     {
-        // MessagePack deserializes Data as object automatically
-        var useItem = input.Data as UseItemMessage;
+        // Convert message.Data to UseItemMessage
+        var useItem = ConvertMessageData<UseItemMessage>(input.Data);
         if (useItem == null)
         {
             _logger.LogWarning("Invalid use item data from {PlayerId}", player.PlayerId);
@@ -260,8 +285,8 @@ public class InputProcessor
     /// </summary>
     private void HandleExtraction(RealTimePlayer player, NetworkMessage input)
     {
-        // MessagePack deserializes Data as object automatically
-        var extraction = input.Data as ExtractionMessage;
+        // Convert message.Data to ExtractionMessage
+        var extraction = ConvertMessageData<ExtractionMessage>(input.Data);
         if (extraction == null)
         {
             _logger.LogWarning("Invalid extraction data from {PlayerId}", player.PlayerId);
@@ -276,8 +301,8 @@ public class InputProcessor
     /// </summary>
     private void HandleTradeRequest(RealTimePlayer player, NetworkMessage input)
     {
-        // MessagePack deserializes Data as object automatically
-        var tradeRequest = input.Data as TradeRequestMessage;
+        // Convert message.Data to TradeRequestMessage
+        var tradeRequest = ConvertMessageData<TradeRequestMessage>(input.Data);
         if (tradeRequest == null)
         {
             _logger.LogWarning("Invalid trade request data from {PlayerId}", player.PlayerId);

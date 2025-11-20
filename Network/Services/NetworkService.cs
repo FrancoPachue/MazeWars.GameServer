@@ -160,6 +160,30 @@ public class UdpNetworkService : IDisposable
     }
 
     // =============================================
+    // MESSAGE DATA DESERIALIZATION HELPER
+    // =============================================
+
+    /// <summary>
+    /// Converts message.Data (deserialized as generic object) to specific type T.
+    /// MessagePack deserializes Data as object, so we need to re-serialize and deserialize with the correct type.
+    /// </summary>
+    private T? ConvertMessageData<T>(object data) where T : class
+    {
+        try
+        {
+            // MessagePack deserializes Data as an array of objects for MessagePackObject types
+            // We need to re-serialize and deserialize with the correct type
+            var bytes = MessagePackSerializer.Serialize(data);
+            return MessagePackSerializer.Deserialize<T>(bytes);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to convert message data to type {Type}", typeof(T).Name);
+            return null;
+        }
+    }
+
+    // =============================================
     // INCOMING MESSAGE PROCESSING
     // =============================================
 
@@ -426,8 +450,8 @@ public class UdpNetworkService : IDisposable
     {
         try
         {
-            // MessagePack deserializes Data as object automatically
-            var connectData = message.Data as ClientConnectData;
+            // Convert message.Data to ClientConnectData
+            var connectData = ConvertMessageData<ClientConnectData>(message.Data);
             if (connectData == null)
             {
                 await SendErrorToClient(clientEndPoint, "Invalid connect data");
@@ -532,8 +556,8 @@ public class UdpNetworkService : IDisposable
     {
         try
         {
-            // MessagePack deserializes Data as object automatically
-            var reconnectData = message.Data as ReconnectRequestData;
+            // Convert message.Data to ReconnectRequestData
+            var reconnectData = ConvertMessageData<ReconnectRequestData>(message.Data);
             if (reconnectData == null)
             {
                 await SendErrorToClient(clientEndPoint, "Invalid reconnect data");
@@ -881,8 +905,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            // MessagePack deserializes Data as object automatically
-            var inputData = message.Data as PlayerInputMessage;
+            // Convert message.Data to PlayerInputMessage
+            var inputData = ConvertMessageData<PlayerInputMessage>(message.Data);
             if (inputData == null) return;
 
             if (inputData.MoveInput.Magnitude > 1.1f)
@@ -912,8 +936,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            // MessagePack deserializes Data as object automatically
-            var lootGrab = message.Data as LootGrabMessage;
+            // Convert message.Data to LootGrabMessage
+            var lootGrab = ConvertMessageData<LootGrabMessage>(message.Data);
             if (lootGrab == null || string.IsNullOrWhiteSpace(lootGrab.LootId))
             {
                 await SendErrorToClient(clientEndPoint, "Invalid loot grab data");
@@ -938,8 +962,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            // MessagePack deserializes Data as object automatically
-            var chatData = message.Data as ChatMessage;
+            // Convert message.Data to ChatMessage
+            var chatData = ConvertMessageData<ChatMessage>(message.Data);
             if (chatData == null || string.IsNullOrWhiteSpace(chatData.Message))
                 return;
 
@@ -979,8 +1003,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            // MessagePack deserializes Data as object automatically
-            var useItemData = message.Data as UseItemMessage;
+            // Convert message.Data to UseItemMessage
+            var useItemData = ConvertMessageData<UseItemMessage>(message.Data);
             if (useItemData == null || string.IsNullOrWhiteSpace(useItemData.ItemId))
             {
                 await SendErrorToClient(clientEndPoint, "Invalid use item data");
@@ -1006,8 +1030,8 @@ public class UdpNetworkService : IDisposable
 
         try
         {
-            // MessagePack deserializes Data as object automatically
-            var extractionData = message.Data as ExtractionMessage;
+            // Convert message.Data to ExtractionMessage
+            var extractionData = ConvertMessageData<ExtractionMessage>(message.Data);
             if (extractionData == null || string.IsNullOrWhiteSpace(extractionData.Action))
             {
                 await SendErrorToClient(clientEndPoint, "Invalid extraction data");
