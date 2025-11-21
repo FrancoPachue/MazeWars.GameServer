@@ -106,7 +106,8 @@ public class ClientRateLimit
     {
         return messageType.ToLower() switch
         {
-            "player_input" => 120,
+            // 60 FPS * 60 seconds = 3600/min, allow 4000 for burst tolerance
+            "player_input" => 4000,
             "chat" => 10,
             "loot_grab" => 30,
             "use_item" => 20,
