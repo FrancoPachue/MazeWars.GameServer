@@ -585,7 +585,13 @@ public class RealTimeGameEngine
         if (!player.IsAlive) return;
 
         var world = FindWorldByPlayer(player.PlayerId);
-        if (world == null) return;
+
+        // ⭐ LOBBY MOVEMENT: Players in lobby (tavern) can move but not attack
+        if (world == null)
+        {
+            ProcessLobbyMovement(player, input);
+            return;
+        }
 
         // Usar MovementSystem para procesar movimiento
         var movementResult = _movementSystem.UpdatePlayerMovement(player, input, world, 1.0f / _settings.TargetFPS);
@@ -608,7 +614,7 @@ public class RealTimeGameEngine
 
         player.Direction = input.AimDirection;
 
-        // Usar CombatSystem para ataques y habilidades
+        // Usar CombatSystem para ataques y habilidades (only in game world, not lobby)
         if (input.IsAttacking && _combatSystem.CanAttack(player))
         {
             ProcessAttack(player);
@@ -620,6 +626,53 @@ public class RealTimeGameEngine
         }
 
         player.LastActivity = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Process movement for players in lobby (tavern area).
+    /// Simple movement without world bounds validation - no combat allowed.
+    /// </summary>
+    private void ProcessLobbyMovement(RealTimePlayer player, PlayerInputMessage input)
+    {
+        var deltaTime = 1.0f / _settings.TargetFPS;
+
+        // Calculate speed (with sprint support)
+        var baseSpeed = _settings.GameBalance.MovementSpeed;
+        var speed = input.IsSprinting ? baseSpeed * _settings.GameBalance.SprintMultiplier : baseSpeed;
+
+        // Process movement if there's input
+        if (input.MoveInput.Magnitude > 0.1f)
+        {
+            var normalizedInput = input.MoveInput.GetNormalized();
+            var velocity = normalizedInput * speed;
+            var newPosition = player.Position + velocity * deltaTime;
+
+            // Simple bounds for lobby area (can be configured later for tavern size)
+            const float lobbyMinX = -50f;
+            const float lobbyMaxX = 50f;
+            const float lobbyMinY = -50f;
+            const float lobbyMaxY = 50f;
+
+            // Clamp to lobby bounds
+            newPosition.X = Math.Clamp(newPosition.X, lobbyMinX, lobbyMaxX);
+            newPosition.Y = Math.Clamp(newPosition.Y, lobbyMinY, lobbyMaxY);
+
+            player.Position = newPosition;
+            player.Velocity = velocity;
+            player.IsMoving = true;
+            player.IsSprinting = input.IsSprinting;
+        }
+        else
+        {
+            player.Velocity = new Vector2 { X = 0, Y = 0 };
+            player.IsMoving = false;
+            player.IsSprinting = false;
+        }
+
+        player.Direction = input.AimDirection;
+        player.LastActivity = DateTime.UtcNow;
+
+        // Note: Combat is NOT processed in lobby - players cannot attack each other in tavern
     }
 
     private void ProcessLootGrab(RealTimePlayer player, LootGrabMessage lootGrab)
