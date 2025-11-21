@@ -1,22 +1,22 @@
-﻿using MessagePack;
+using MessagePack;
 
 namespace MazeWars.GameServer.Network.Models;
 
 /// <summary>
-/// Connection messages from client to server.
+/// Broadcast to all players when a new player joins the world/lobby.
 /// </summary>
 [MessagePackObject(keyAsPropertyName: false)]
-public class ClientConnectData
+public class PlayerJoinedData
 {
     [Key(0)]
     public string PlayerName { get; set; } = string.Empty;
 
     [Key(1)]
-    public string PlayerClass { get; set; } = "scout";
+    public string PlayerClass { get; set; } = string.Empty;
 
     [Key(2)]
     public string TeamId { get; set; } = string.Empty;
 
     [Key(3)]
-    public string AuthToken { get; set; } = string.Empty;
+    public bool IsLobby { get; set; }
 }

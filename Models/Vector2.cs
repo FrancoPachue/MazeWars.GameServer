@@ -2,7 +2,7 @@
 
 namespace MazeWars.GameServer.Models;
 
-[MessagePackObject]
+[MessagePackObject(keyAsPropertyName: false)]
 public struct Vector2
 {
     [Key(0)]

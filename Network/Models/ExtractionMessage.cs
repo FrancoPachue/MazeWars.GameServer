@@ -5,7 +5,7 @@ namespace MazeWars.GameServer.Network.Models;
 /// <summary>
 /// Extraction request from client to server.
 /// </summary>
-[MessagePackObject]
+[MessagePackObject(keyAsPropertyName: false)]
 public class ExtractionMessage
 {
     [Key(0)]

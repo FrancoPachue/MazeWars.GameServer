@@ -1,10 +1,13 @@
-﻿using MazeWars.GameServer.Models;
+using MazeWars.GameServer.Models;
 using MessagePack;
 
 namespace MazeWars.GameServer.Network.Models;
 
+/// <summary>
+/// Simplified player state for batch updates.
+/// </summary>
 [MessagePackObject(keyAsPropertyName: false)]
-public class PlayerStateUpdate
+public class PlayerUpdateData
 {
     [Key(0)]
     public string PlayerId { get; set; } = string.Empty;
@@ -25,17 +28,23 @@ public class PlayerStateUpdate
     public int MaxHealth { get; set; }
 
     [Key(6)]
-    public bool IsAlive { get; set; }
+    public int Mana { get; set; }
 
     [Key(7)]
-    public bool IsMoving { get; set; }
+    public int MaxMana { get; set; }
 
     [Key(8)]
-    public bool IsCasting { get; set; }
+    public int Level { get; set; }
 
     [Key(9)]
-    public string PlayerName { get; set; } = string.Empty;
+    public bool IsAlive { get; set; }
 
     [Key(10)]
-    public string PlayerClass { get; set; } = string.Empty;
+    public bool IsMoving { get; set; }
+
+    [Key(11)]
+    public bool IsCasting { get; set; }
+
+    [Key(12)]
+    public string CurrentRoomId { get; set; } = string.Empty;
 }

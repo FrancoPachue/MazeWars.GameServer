@@ -3,7 +3,7 @@
 namespace MazeWars.GameServer.Network.Models;
 
 // Update Messages (Server → Client)
-[MessagePackObject]
+[MessagePackObject(keyAsPropertyName: false)]
 public class WorldUpdateMessage
 {
     // ⭐ SYNC CRITICAL: Acknowledged input sequences per player (for client reconciliation)

@@ -1,16 +1,19 @@
-﻿using MessagePack;
+using MessagePack;
 
 namespace MazeWars.GameServer.Network.Models;
 
 /// <summary>
-/// Chat message from client to server.
+/// Administrative message broadcast to players.
 /// </summary>
 [MessagePackObject(keyAsPropertyName: false)]
-public class ChatMessage
+public class AdminMessageData
 {
     [Key(0)]
     public string Message { get; set; } = string.Empty;
 
     [Key(1)]
-    public string ChatType { get; set; } = "team";
+    public DateTime Timestamp { get; set; }
+
+    [Key(2)]
+    public bool IsSystemMessage { get; set; }
 }

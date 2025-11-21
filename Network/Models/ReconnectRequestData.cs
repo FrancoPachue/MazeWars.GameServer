@@ -5,7 +5,7 @@ namespace MazeWars.GameServer.Network.Models;
 /// <summary>
 /// Client request to reconnect using session token.
 /// </summary>
-[MessagePackObject]
+[MessagePackObject(keyAsPropertyName: false)]
 public class ReconnectRequestData
 {
     [Key(0)]
