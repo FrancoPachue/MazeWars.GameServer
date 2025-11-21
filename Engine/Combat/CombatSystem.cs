@@ -15,8 +15,17 @@ public class CombatSystem : ICombatSystem
     private readonly GameServerSettings _settings;
     private readonly Random _random;
 
+    // ⭐ Projectile spawning callback (set by GameEngine)
+    public Func<Projectile, GameWorld, Projectile>? SpawnProjectile { get; set; }
+
     public event Action<string, CombatEvent>? OnCombatEvent;
     public event Action<RealTimePlayer, RealTimePlayer?>? OnPlayerDeath;
+
+    // ⭐ IMPROVED: Combat parameters for Battlerite-style gameplay
+    private const float MELEE_ATTACK_RANGE = 2.5f; // Increased from 1.5
+    private const float MELEE_CONE_ANGLE = 0.7f; // ~90 degree cone (was 0.5 / 60 degrees)
+    private const float CRITICAL_HIT_MULTIPLIER = 2.0f; // Increased from 1.5
+    private const float SCOUT_CRIT_CHANCE = 0.20f; // Increased from 0.15
 
     public CombatSystem(ILogger<CombatSystem> logger, IOptions<GameServerSettings> settings)
     {
@@ -182,12 +191,21 @@ public class CombatSystem : ICombatSystem
     private List<RealTimePlayer> FindTargetsInRange(RealTimePlayer attacker, List<RealTimePlayer> potentialTargets)
     {
         var targets = new List<RealTimePlayer>();
-        var attackRange = _settings.GameBalance.AttackRange;
+        // ⭐ Use improved attack range
+        var attackRange = MELEE_ATTACK_RANGE;
 
         foreach (var player in potentialTargets)
         {
             if (player.PlayerId == attacker.PlayerId || !player.IsAlive) continue;
             if (player.CurrentRoomId != attacker.CurrentRoomId) continue;
+
+            // ⭐ Skip stealthed targets (unless attacker is close)
+            if (player.StatusEffects.Any(e => e.EffectType == "stealth"))
+            {
+                var stealthDetectionRange = 1.5f;
+                if (GameMathUtils.Distance(player.Position, attacker.Position) > stealthDetectionRange)
+                    continue;
+            }
 
             var distance = GameMathUtils.Distance(player.Position, attacker.Position);
             if (distance <= attackRange)
@@ -199,7 +217,8 @@ public class CombatSystem : ICombatSystem
                 );
 
                 var dotProduct = directionToTarget.X * attackDirection.X + directionToTarget.Y * attackDirection.Y;
-                if (dotProduct > 0.5f) // ~60 degree cone
+                // ⭐ Use improved cone angle
+                if (dotProduct > MELEE_CONE_ANGLE)
                 {
                     targets.Add(player);
                 }
@@ -236,11 +255,20 @@ public class CombatSystem : ICombatSystem
         var finalDamage = (float)baseDamage;
         finalDamage *= (1f - target.DamageReduction);
 
-        // Critical hit chance for scouts
-        if (attacker.PlayerClass == "scout" && _random.NextDouble() < 0.15)
+        // ⭐ IMPROVED: Critical hit system
+        var critChance = attacker.PlayerClass.ToLower() switch
         {
-            finalDamage *= 1.5f;
-            // TODO: Emit critical hit event
+            "scout" => SCOUT_CRIT_CHANCE,
+            "tank" => 0.05f,
+            "support" => 0.08f,
+            _ => 0.10f
+        };
+
+        if (_random.NextDouble() < critChance)
+        {
+            finalDamage *= CRITICAL_HIT_MULTIPLIER;
+            _logger.LogDebug("Critical hit! {Attacker} dealt {Damage} to {Target}",
+                attacker.PlayerName, finalDamage, target.PlayerName);
         }
 
         return Math.Max(1, (int)finalDamage);
@@ -388,6 +416,7 @@ public class CombatSystem : ICombatSystem
                 var newPosition = player.Position + direction * 10f;
                 // Validate position with world bounds
                 player.Position = newPosition;
+                player.ForceNextUpdate(); // Force network update after dash
                 result.Message = "Dashed forward";
                 break;
 
@@ -400,6 +429,49 @@ public class CombatSystem : ICombatSystem
                     SourcePlayerId = player.PlayerId
                 });
                 result.Message = "Entered stealth";
+                break;
+
+            // ⭐ NEW: Skillshot arrow ability (Battlerite-style)
+            case "arrow":
+            case "snipe":
+                if (SpawnProjectile != null)
+                {
+                    var arrowDirection = (target - player.Position).GetNormalized();
+                    var projectile = ProjectilePresets.CreateArrow(
+                        player.PlayerId,
+                        player.TeamId,
+                        player.Position + arrowDirection * 0.5f, // Spawn slightly in front
+                        arrowDirection
+                    );
+                    SpawnProjectile(projectile, world);
+                    result.Message = "Fired arrow";
+                }
+                else
+                {
+                    result.Success = false;
+                    result.ErrorMessage = "Projectile system not available";
+                }
+                break;
+
+            // ⭐ NEW: Piercing arrow (goes through multiple targets)
+            case "piercing_arrow":
+                if (SpawnProjectile != null)
+                {
+                    var piercingDir = (target - player.Position).GetNormalized();
+                    var piercingProjectile = ProjectilePresets.CreatePiercingArrow(
+                        player.PlayerId,
+                        player.TeamId,
+                        player.Position + piercingDir * 0.5f,
+                        piercingDir
+                    );
+                    SpawnProjectile(piercingProjectile, world);
+                    result.Message = "Fired piercing arrow";
+                }
+                else
+                {
+                    result.Success = false;
+                    result.ErrorMessage = "Projectile system not available";
+                }
                 break;
 
             default:
@@ -498,6 +570,48 @@ public class CombatSystem : ICombatSystem
                 result.Message = $"Buffed {buffTargets.Count} teammates";
                 break;
 
+            // ⭐ NEW: Fireball skillshot
+            case "fireball":
+                if (SpawnProjectile != null)
+                {
+                    var fireballDir = (target - player.Position).GetNormalized();
+                    var fireball = ProjectilePresets.CreateFireball(
+                        player.PlayerId,
+                        player.TeamId,
+                        player.Position + fireballDir * 0.5f,
+                        fireballDir
+                    );
+                    SpawnProjectile(fireball, world);
+                    result.Message = "Cast fireball";
+                }
+                else
+                {
+                    result.Success = false;
+                    result.ErrorMessage = "Projectile system not available";
+                }
+                break;
+
+            // ⭐ NEW: Ice bolt skillshot (slows on hit)
+            case "ice_bolt":
+                if (SpawnProjectile != null)
+                {
+                    var iceDir = (target - player.Position).GetNormalized();
+                    var iceBolt = ProjectilePresets.CreateIceBolt(
+                        player.PlayerId,
+                        player.TeamId,
+                        player.Position + iceDir * 0.5f,
+                        iceDir
+                    );
+                    SpawnProjectile(iceBolt, world);
+                    result.Message = "Cast ice bolt";
+                }
+                else
+                {
+                    result.Success = false;
+                    result.ErrorMessage = "Projectile system not available";
+                }
+                break;
+
             default:
                 result.Success = false;
                 result.ErrorMessage = $"Unknown support ability: {abilityType}";
@@ -511,12 +625,23 @@ public class CombatSystem : ICombatSystem
     {
         return abilityType.ToLower() switch
         {
+            // Scout abilities
             "dash" => TimeSpan.FromSeconds(5),
             "stealth" => TimeSpan.FromSeconds(12),
+            "arrow" => TimeSpan.FromSeconds(0.8), // ⭐ Low cooldown skillshot
+            "snipe" => TimeSpan.FromSeconds(0.8),
+            "piercing_arrow" => TimeSpan.FromSeconds(6),
+
+            // Tank abilities
             "charge" => TimeSpan.FromSeconds(8),
             "shield" => TimeSpan.FromSeconds(15),
+
+            // Support abilities
             "heal" => TimeSpan.FromSeconds(6),
             "buff" => TimeSpan.FromSeconds(10),
+            "fireball" => TimeSpan.FromSeconds(1.5), // ⭐ Support fireball
+            "ice_bolt" => TimeSpan.FromSeconds(2),
+
             _ => TimeSpan.FromSeconds(5)
         };
     }
@@ -525,12 +650,23 @@ public class CombatSystem : ICombatSystem
     {
         return abilityType.ToLower() switch
         {
+            // Scout abilities
             "dash" => 20,
             "stealth" => 30,
+            "arrow" => 5, // ⭐ Low cost for basic attack
+            "snipe" => 5,
+            "piercing_arrow" => 25,
+
+            // Tank abilities
             "charge" => 25,
             "shield" => 40,
+
+            // Support abilities
             "heal" => 35,
             "buff" => 30,
+            "fireball" => 15,
+            "ice_bolt" => 12,
+
             _ => 20
         };
     }
