@@ -504,7 +504,7 @@ public class UdpNetworkService : IDisposable
             }
 
             // Route message based on type
-            _logger.LogInformation("📨 Received message type '{Type}' from {EndPoint}", networkMessage.Type, clientEndPoint);
+            _logger.LogDebug("Received message type '{Type}' from {EndPoint}", networkMessage.Type, clientEndPoint);
             switch (networkMessage.Type.ToLower())
             {
                 case "heartbeat":

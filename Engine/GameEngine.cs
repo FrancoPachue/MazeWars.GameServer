@@ -1696,7 +1696,7 @@ public class RealTimeGameEngine
         foreach (var player in players)
         {
             var ackSeq = _inputProcessor.GetLastAcknowledgedSequence(player.PlayerId);
-            _logger.LogInformation("🔍 ACK lookup: PlayerId={PlayerId}, AckSeq={AckSeq}", player.PlayerId, ackSeq);
+            _logger.LogDebug("ACK lookup: PlayerId={PlayerId}, AckSeq={AckSeq}", player.PlayerId, ackSeq);
             if (ackSeq > 0)
             {
                 acknowledgedInputs[player.PlayerId] = ackSeq;
