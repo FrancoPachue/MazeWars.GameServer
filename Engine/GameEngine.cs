@@ -640,8 +640,6 @@ public class RealTimeGameEngine
         var baseSpeed = _settings.GameBalance.MovementSpeed;
         var speed = input.IsSprinting ? baseSpeed * _settings.GameBalance.SprintMultiplier : baseSpeed;
 
-        var oldPosition = player.Position;
-
         // Process movement if there's input
         if (input.MoveInput.Magnitude > 0.1f)
         {
@@ -649,11 +647,11 @@ public class RealTimeGameEngine
             var velocity = normalizedInput * speed;
             var newPosition = player.Position + velocity * deltaTime;
 
-            // Simple bounds for lobby area (can be configured later for tavern size)
-            const float lobbyMinX = -50f;
-            const float lobbyMaxX = 50f;
-            const float lobbyMinY = -50f;
-            const float lobbyMaxY = 50f;
+            // Lobby bounds matching the game world spawn area (0-240)
+            const float lobbyMinX = 0f;
+            const float lobbyMaxX = 240f;
+            const float lobbyMinY = 0f;
+            const float lobbyMaxY = 240f;
 
             // Clamp to lobby bounds
             newPosition.X = Math.Clamp(newPosition.X, lobbyMinX, lobbyMaxX);
@@ -663,9 +661,6 @@ public class RealTimeGameEngine
             player.Velocity = velocity;
             player.IsMoving = true;
             player.IsSprinting = input.IsSprinting;
-
-            _logger.LogInformation("LOBBY MOVE: {Player} ({OldX:F2},{OldY:F2}) -> ({NewX:F2},{NewY:F2})",
-                player.PlayerName, oldPosition.X, oldPosition.Y, newPosition.X, newPosition.Y);
         }
         else
         {

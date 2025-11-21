@@ -1367,35 +1367,29 @@ public class UdpNetworkService : IDisposable
             {
                 var batch = players.Skip(i).Take(maxPlayersPerBatch).ToList();
 
-                var playerUpdates = batch.Select(p => {
-                    // DEBUG: Log position being sent
-                    _logger.LogInformation("SENDING POS: {Player} at ({X:F2},{Y:F2})",
-                        p.PlayerName, p.Position.X, p.Position.Y);
-
-                    return new PlayerUpdateData
+                var playerUpdates = batch.Select(p => new PlayerUpdateData
+                {
+                    PlayerId = p.PlayerId,
+                    Position = new Vector2
                     {
-                        PlayerId = p.PlayerId,
-                        Position = new Vector2
-                        {
-                            X = (float)Math.Round(p.Position.X, 1),
-                            Y = (float)Math.Round(p.Position.Y, 1)
-                        },
-                        Velocity = new Vector2
-                        {
-                            X = (float)Math.Round(p.Velocity.X, 1),
-                            Y = (float)Math.Round(p.Velocity.Y, 1)
-                        },
-                        Direction = (float)Math.Round(p.Direction, 2),
-                        Health = p.Health,
-                        MaxHealth = p.MaxHealth,
-                        Mana = p.Mana,
-                        MaxMana = p.MaxMana,
-                        Level = p.Level,
-                        IsAlive = p.IsAlive,
-                        IsMoving = p.IsMoving,
-                        IsCasting = p.IsCasting,
-                        CurrentRoomId = p.CurrentRoomId
-                    };
+                        X = (float)Math.Round(p.Position.X, 1),
+                        Y = (float)Math.Round(p.Position.Y, 1)
+                    },
+                    Velocity = new Vector2
+                    {
+                        X = (float)Math.Round(p.Velocity.X, 1),
+                        Y = (float)Math.Round(p.Velocity.Y, 1)
+                    },
+                    Direction = (float)Math.Round(p.Direction, 2),
+                    Health = p.Health,
+                    MaxHealth = p.MaxHealth,
+                    Mana = p.Mana,
+                    MaxMana = p.MaxMana,
+                    Level = p.Level,
+                    IsAlive = p.IsAlive,
+                    IsMoving = p.IsMoving,
+                    IsCasting = p.IsCasting,
+                    CurrentRoomId = p.CurrentRoomId
                 }).ToList();
 
                 // ⭐ INPUT ACKNOWLEDGMENT: Get acknowledged sequences for client reconciliation
