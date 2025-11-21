@@ -511,6 +511,7 @@ public class UdpNetworkService : IDisposable
             }
 
             // Route message based on type
+            _logger.LogInformation("📨 Received message type '{Type}' from {EndPoint}", networkMessage.Type, clientEndPoint);
             switch (networkMessage.Type.ToLower())
             {
                 case "heartbeat":
@@ -1034,7 +1035,12 @@ public class UdpNetworkService : IDisposable
         {
             // Convert message.Data to PlayerInputMessage
             var inputData = ConvertMessageData<PlayerInputMessage>(message.Data);
-            if (inputData == null) return;
+            if (inputData == null)
+            {
+                _logger.LogWarning("❌ ConvertMessageData failed for player_input from {PlayerId}. Data type: {DataType}",
+                    client.Player.PlayerId, message.Data?.GetType().Name ?? "null");
+                return;
+            }
 
             if (inputData.MoveInput.Magnitude > 1.1f)
             {
