@@ -266,14 +266,12 @@ public class InputProcessor
             return;
         }
 
-        _logger.LogInformation("🔎 Looking up player with ID: {PlayerId}", input.PlayerId);
         var player = PlayerLookup(input.PlayerId);
         if (player == null)
         {
-            _logger.LogWarning("❌ Player not found for ID: {PlayerId}", input.PlayerId);
+            _logger.LogWarning("Player not found for ID: {PlayerId}", input.PlayerId);
             return;
         }
-        _logger.LogInformation("✅ Found player: {PlayerName} ({PlayerId})", player.Name, player.PlayerId);
 
         // Dispatch to appropriate handler based on input type
         switch (input.Type.ToLower())
@@ -326,12 +324,8 @@ public class InputProcessor
             return;
         }
 
-        _logger.LogInformation("📥 Input received: PlayerId={PlayerId}, Seq={Seq}", player.PlayerId, playerInput.SequenceNumber);
-
         // ⭐ SYNC: Use InputBuffer to handle UDP packet reordering
         var orderedInputs = _inputBuffer.ProcessInput(player.PlayerId, playerInput);
-
-        _logger.LogInformation("📋 Ordered inputs count: {Count} for {PlayerId}", orderedInputs.Count, player.PlayerId);
 
         // Process inputs in correct order and trigger event for each
         foreach (var orderedInput in orderedInputs)

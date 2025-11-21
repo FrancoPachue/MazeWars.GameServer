@@ -70,7 +70,7 @@ public class InputBuffer
             _lastProcessedSequence[playerId] = input.SequenceNumber;
             stats.InOrderInputs++;
 
-            _logger.LogInformation("✅ ACK: Input seq {Seq} processed for {PlayerId}", input.SequenceNumber, playerId);
+            _logger.LogDebug("ACK: Input seq {Seq} processed for {PlayerId}", input.SequenceNumber, playerId);
 
             // ⭐ Process any buffered inputs that are now in order
             result.AddRange(ProcessBufferedInputs(playerId));
