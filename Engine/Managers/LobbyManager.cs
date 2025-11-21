@@ -227,6 +227,24 @@ public class LobbyManager
     }
 
     /// <summary>
+    /// Find a player across all lobbies by their PlayerId.
+    /// </summary>
+    public RealTimePlayer? FindPlayer(string playerId)
+    {
+        lock (_lobbiesLock)
+        {
+            foreach (var lobby in _worldLobbies.Values)
+            {
+                if (lobby.Players.TryGetValue(playerId, out var player))
+                {
+                    return player;
+                }
+            }
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Get available lobbies that are accepting players.
     /// </summary>
     public List<string> GetAvailableLobbies(int maxPlayersPerWorld)

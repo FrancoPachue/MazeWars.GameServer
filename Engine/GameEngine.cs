@@ -1467,11 +1467,17 @@ public class RealTimeGameEngine
     // =============================================
 
     /// <summary>
-    /// ⭐ REFACTORED: Find player across all worlds (delegated to WorldManager).
+    /// ⭐ REFACTORED: Find player across all worlds AND lobbies.
     /// </summary>
     private RealTimePlayer? FindPlayer(string playerId)
     {
-        return _worldManager.FindPlayer(playerId);
+        // First check active game worlds
+        var player = _worldManager.FindPlayer(playerId);
+        if (player != null)
+            return player;
+
+        // Then check lobbies (players waiting to start)
+        return _lobbyManager.FindPlayer(playerId);
     }
 
     /// <summary>
