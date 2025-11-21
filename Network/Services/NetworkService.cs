@@ -439,13 +439,6 @@ public class UdpNetworkService : IDisposable
     {
         try
         {
-            // Rate limiting check
-            if (!_rateLimitingService.IsAllowed(clientEndPoint, "general"))
-            {
-                _logger.LogWarning("Rate limit exceeded for {EndPoint}", clientEndPoint);
-                return;
-            }
-
             // ⭐ MESSAGEPACK: Deserialize incoming messages with MessagePack for consistency
             NetworkMessage? networkMessage;
             try
