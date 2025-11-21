@@ -266,12 +266,14 @@ public class InputProcessor
             return;
         }
 
+        _logger.LogInformation("🔎 Looking up player with ID: {PlayerId}", input.PlayerId);
         var player = PlayerLookup(input.PlayerId);
         if (player == null)
         {
-            _logger.LogDebug("Received input for unknown player {PlayerId}", input.PlayerId);
+            _logger.LogWarning("❌ Player not found for ID: {PlayerId}", input.PlayerId);
             return;
         }
+        _logger.LogInformation("✅ Found player: {PlayerName} ({PlayerId})", player.Name, player.PlayerId);
 
         // Dispatch to appropriate handler based on input type
         switch (input.Type.ToLower())
