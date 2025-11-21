@@ -640,6 +640,8 @@ public class RealTimeGameEngine
         var baseSpeed = _settings.GameBalance.MovementSpeed;
         var speed = input.IsSprinting ? baseSpeed * _settings.GameBalance.SprintMultiplier : baseSpeed;
 
+        var oldPosition = player.Position;
+
         // Process movement if there's input
         if (input.MoveInput.Magnitude > 0.1f)
         {
@@ -661,6 +663,9 @@ public class RealTimeGameEngine
             player.Velocity = velocity;
             player.IsMoving = true;
             player.IsSprinting = input.IsSprinting;
+
+            _logger.LogInformation("LOBBY MOVE: {Player} ({OldX:F2},{OldY:F2}) -> ({NewX:F2},{NewY:F2})",
+                player.PlayerName, oldPosition.X, oldPosition.Y, newPosition.X, newPosition.Y);
         }
         else
         {
