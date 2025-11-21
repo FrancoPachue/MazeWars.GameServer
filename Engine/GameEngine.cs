@@ -1690,11 +1690,14 @@ public class RealTimeGameEngine
         foreach (var player in players)
         {
             var ackSeq = _inputProcessor.GetLastAcknowledgedSequence(player.PlayerId);
+            _logger.LogInformation("🔍 ACK lookup: PlayerId={PlayerId}, AckSeq={AckSeq}", player.PlayerId, ackSeq);
             if (ackSeq > 0)
             {
                 acknowledgedInputs[player.PlayerId] = ackSeq;
             }
         }
+        _logger.LogInformation("📤 Sending {Count} acks: {Acks}", acknowledgedInputs.Count,
+            string.Join(", ", acknowledgedInputs.Select(x => $"{x.Key}={x.Value}")));
         return acknowledgedInputs;
     }
 

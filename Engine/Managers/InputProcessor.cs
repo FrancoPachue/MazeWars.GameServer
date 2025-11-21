@@ -324,8 +324,12 @@ public class InputProcessor
             return;
         }
 
+        _logger.LogInformation("📥 Input received: PlayerId={PlayerId}, Seq={Seq}", player.PlayerId, playerInput.SequenceNumber);
+
         // ⭐ SYNC: Use InputBuffer to handle UDP packet reordering
         var orderedInputs = _inputBuffer.ProcessInput(player.PlayerId, playerInput);
+
+        _logger.LogInformation("📋 Ordered inputs count: {Count} for {PlayerId}", orderedInputs.Count, player.PlayerId);
 
         // Process inputs in correct order and trigger event for each
         foreach (var orderedInput in orderedInputs)
