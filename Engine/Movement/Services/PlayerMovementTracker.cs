@@ -12,16 +12,84 @@ public class PlayerMovementTracker
     public DateTime LastValidation { get; set; } = DateTime.UtcNow;
     public bool IsBeingMonitored { get; set; }
 
+    // ⭐ NEW: Rate limiting tracking
+    public int InputsThisSecond { get; set; }
+    public DateTime LastInputSecondStart { get; set; } = DateTime.UtcNow;
+    public const int MAX_INPUTS_PER_SECOND = 35; // Allow some tolerance over 30 expected
+
+    // ⭐ NEW: Suspicion decay tracking
+    public float SuspicionLevel { get; set; }
+    public int ConsecutiveValidMovements { get; set; }
+    public const float SUSPICION_DECAY_RATE = 0.1f; // Decay per valid movement
+    public const int VALID_MOVEMENTS_TO_CLEAR_MONITORING = 100;
+
     public void AddPosition(Vector2 position)
     {
         RecentPositions.Add(position);
         PositionTimestamps.Add(DateTime.UtcNow);
+        LastValidation = DateTime.UtcNow;
 
         // Keep only last 10 positions for analysis
         while (RecentPositions.Count > 10)
         {
             RecentPositions.RemoveAt(0);
             PositionTimestamps.RemoveAt(0);
+        }
+    }
+
+    /// <summary>
+    /// Check and update rate limiting. Returns true if rate limit exceeded.
+    /// </summary>
+    public bool CheckRateLimit()
+    {
+        var now = DateTime.UtcNow;
+        var secondsDiff = (now - LastInputSecondStart).TotalSeconds;
+
+        if (secondsDiff >= 1.0)
+        {
+            // Reset counter for new second
+            InputsThisSecond = 1;
+            LastInputSecondStart = now;
+            return false;
+        }
+
+        InputsThisSecond++;
+        return InputsThisSecond > MAX_INPUTS_PER_SECOND;
+    }
+
+    /// <summary>
+    /// Record a valid movement and apply suspicion decay
+    /// </summary>
+    public void RecordValidMovement()
+    {
+        ConsecutiveValidMovements++;
+
+        // Apply suspicion decay
+        if (SuspicionLevel > 0)
+        {
+            SuspicionLevel = Math.Max(0, SuspicionLevel - SUSPICION_DECAY_RATE);
+        }
+
+        // Clear monitoring after enough valid movements
+        if (IsBeingMonitored && ConsecutiveValidMovements >= VALID_MOVEMENTS_TO_CLEAR_MONITORING)
+        {
+            IsBeingMonitored = false;
+            SuspiciousMovements = Math.Max(0, SuspiciousMovements - 1);
+        }
+    }
+
+    /// <summary>
+    /// Record a suspicious movement
+    /// </summary>
+    public void RecordSuspiciousMovement(float addedSuspicion)
+    {
+        SuspiciousMovements++;
+        ConsecutiveValidMovements = 0;
+        SuspicionLevel = Math.Min(1.0f, SuspicionLevel + addedSuspicion);
+
+        if (SuspicionLevel > 0.8f)
+        {
+            IsBeingMonitored = true;
         }
     }
 

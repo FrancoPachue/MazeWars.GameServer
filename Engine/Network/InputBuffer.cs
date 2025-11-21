@@ -23,6 +23,7 @@ public class InputBuffer
     // Configuration
     private const int MAX_BUFFER_SIZE = 100; // Max inputs to buffer per player
     private const int INPUT_TIMEOUT_MS = 100; // Time to wait for missing inputs
+    private const uint SEQUENCE_WRAPAROUND_THRESHOLD = uint.MaxValue - 1000; // Detect wraparound
 
     // Statistics
     private readonly Dictionary<string, InputStats> _stats = new();
@@ -30,6 +31,46 @@ public class InputBuffer
     public InputBuffer(ILogger logger)
     {
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Compares two sequence numbers accounting for wraparound.
+    /// Returns: negative if a < b, 0 if equal, positive if a > b
+    /// </summary>
+    private static int CompareSequence(uint a, uint b)
+    {
+        // Handle wraparound using signed comparison
+        // If the difference is greater than half the range, we wrapped
+        var diff = (int)(a - b);
+        return diff;
+    }
+
+    /// <summary>
+    /// Checks if sequence 'a' is newer than sequence 'b' (accounts for wraparound)
+    /// </summary>
+    private static bool IsNewerSequence(uint a, uint b)
+    {
+        // Using signed arithmetic to handle wraparound
+        return (int)(a - b) > 0;
+    }
+
+    /// <summary>
+    /// Checks if we need to handle sequence wraparound for this player
+    /// </summary>
+    private bool ShouldResetSequence(string playerId, uint newSequence)
+    {
+        if (!_lastProcessedSequence.TryGetValue(playerId, out var lastSeq))
+            return false;
+
+        // If last sequence is very high and new sequence is very low, likely wraparound
+        if (lastSeq > SEQUENCE_WRAPAROUND_THRESHOLD && newSequence < 1000)
+        {
+            _logger.LogInformation("Sequence wraparound detected for {PlayerId}: {LastSeq} -> {NewSeq}",
+                playerId, lastSeq, newSequence);
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -50,8 +91,22 @@ public class InputBuffer
         var lastSeq = _lastProcessedSequence[playerId];
         var stats = _stats[playerId];
 
-        // ⭐ CRITICAL: Ignore duplicate or old inputs
-        if (input.SequenceNumber <= lastSeq)
+        // ⭐ Handle sequence wraparound (uint overflow after ~4 billion inputs)
+        if (ShouldResetSequence(playerId, input.SequenceNumber))
+        {
+            _logger.LogInformation("Resetting sequence tracking for {PlayerId} due to wraparound", playerId);
+            _lastProcessedSequence[playerId] = 0;
+            lastSeq = 0;
+
+            // Clear any buffered inputs from old sequence range
+            if (_inputBuffers.ContainsKey(playerId))
+            {
+                _inputBuffers[playerId].Clear();
+            }
+        }
+
+        // ⭐ CRITICAL: Ignore duplicate or old inputs (using wraparound-safe comparison)
+        if (!IsNewerSequence(input.SequenceNumber, lastSeq))
         {
             stats.DuplicateInputs++;
 

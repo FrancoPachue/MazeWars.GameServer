@@ -69,6 +69,17 @@ public class MovementSystem : IMovementSystem
 
     public bool IsValidMovementInput(PlayerInputMessage input, RealTimePlayer player)
     {
+        var tracker = GetOrCreatePlayerTracker(player.PlayerId);
+
+        // ⭐ RATE LIMITING: Check if player is sending inputs too fast
+        if (tracker.CheckRateLimit())
+        {
+            _logger.LogWarning("Rate limit exceeded for {PlayerName}: {InputsPerSec} inputs/sec",
+                player.PlayerName, tracker.InputsThisSecond);
+            tracker.RecordSuspiciousMovement(0.2f);
+            return false; // Silently drop excess inputs
+        }
+
         var validation = ValidateMovementInput(input, player);
 
         if (!validation.IsValid)
@@ -76,15 +87,13 @@ public class MovementSystem : IMovementSystem
             _logger.LogWarning("Invalid movement from {PlayerName}: {Error} (Suspicion: {Suspicion:F2})",
                 player.PlayerName, validation.ValidationError, validation.SuspicionLevel);
 
-            // Track suspicious behavior
-            var tracker = GetOrCreatePlayerTracker(player.PlayerId);
-            tracker.SuspiciousMovements++;
-
-            if (validation.SuspicionLevel > 0.8f)
-            {
-                tracker.IsBeingMonitored = true;
-                _logger.LogWarning("Player {PlayerName} flagged for movement monitoring", player.PlayerName);
-            }
+            // Track suspicious behavior with decay system
+            tracker.RecordSuspiciousMovement(validation.SuspicionLevel);
+        }
+        else
+        {
+            // ⭐ SUSPICION DECAY: Record valid movement to reduce suspicion over time
+            tracker.RecordValidMovement();
         }
 
         return validation.IsValid;
@@ -93,6 +102,25 @@ public class MovementSystem : IMovementSystem
     private MovementValidation ValidateMovementInput(PlayerInputMessage input, RealTimePlayer player)
     {
         var validation = new MovementValidation { IsValid = true };
+
+        // ⭐ CRITICAL: Check for NaN/Infinity values (prevent crashes from malformed data)
+        if (float.IsNaN(input.MoveInput.X) || float.IsNaN(input.MoveInput.Y) ||
+            float.IsInfinity(input.MoveInput.X) || float.IsInfinity(input.MoveInput.Y))
+        {
+            validation.IsValid = false;
+            validation.ValidationError = "Invalid input values (NaN/Infinity detected)";
+            validation.SuspicionLevel = 1.0f; // Maximum suspicion - likely tampering
+            validation.ValidationFlags.Add("INVALID_VALUES");
+            _logger.LogWarning("NaN/Infinity detected in movement input from {PlayerId}", player.PlayerId);
+            return validation;
+        }
+
+        // Check for invalid aim direction
+        if (float.IsNaN(input.AimDirection) || float.IsInfinity(input.AimDirection))
+        {
+            input.AimDirection = player.Direction; // Use last valid direction
+            validation.ValidationFlags.Add("INVALID_AIM_CORRECTED");
+        }
 
         // Check input magnitude
         if (input.MoveInput.Magnitude > _movementSettings.MaxInputMagnitude)
