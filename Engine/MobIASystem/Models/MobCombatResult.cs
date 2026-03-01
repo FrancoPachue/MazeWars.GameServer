@@ -7,6 +7,7 @@ public class MobCombatResult
     public bool AttackPerformed { get; set; }
     public int DamageDealt { get; set; }
     public bool TargetKilled { get; set; }
+    public bool IsCrit { get; set; }
     public bool AbilityUsed { get; set; }
     public string? AbilityType { get; set; }
     public List<StatusEffect> AppliedEffects { get; set; } = new();

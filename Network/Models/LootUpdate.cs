@@ -20,4 +20,10 @@ public class LootUpdate
 
     [Key(4)]
     public string TakenBy { get; set; } = string.Empty;
+
+    [Key(5)]
+    public string RoomId { get; set; } = string.Empty;
+
+    [Key(6)]
+    public int Rarity { get; set; } = 1;
 }

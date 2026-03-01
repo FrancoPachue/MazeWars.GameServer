@@ -1,10 +1,11 @@
-﻿using System.Net;
+using System.Collections.Concurrent;
+using System.Net;
 
 namespace MazeWars.GameServer.Security;
 
 public class RateLimitingService
 {
-    private readonly Dictionary<IPEndPoint, ClientRateLimit> _clientLimits = new();
+    private readonly ConcurrentDictionary<IPEndPoint, ClientRateLimit> _clientLimits = new();
     private readonly Timer _cleanupTimer;
     private readonly ILogger<RateLimitingService> _logger;
 
@@ -17,12 +18,7 @@ public class RateLimitingService
 
     public bool IsAllowed(IPEndPoint clientEndPoint, string messageType)
     {
-        if (!_clientLimits.TryGetValue(clientEndPoint, out var limit))
-        {
-            limit = new ClientRateLimit();
-            _clientLimits[clientEndPoint] = limit;
-        }
-
+        var limit = _clientLimits.GetOrAdd(clientEndPoint, _ => new ClientRateLimit());
         return limit.IsAllowed(messageType);
     }
 
@@ -42,53 +38,66 @@ public class RateLimitingService
 
     private void CleanupExpiredLimits(object? state)
     {
-        var expiredClients = _clientLimits
-            .Where(kvp => kvp.Value.IsExpired())
-            .Select(kvp => kvp.Key)
-            .ToList();
-
-        foreach (var client in expiredClients)
+        foreach (var kvp in _clientLimits)
         {
-            _clientLimits.Remove(client);
+            if (kvp.Value.IsExpired())
+            {
+                _clientLimits.TryRemove(kvp.Key, out _);
+            }
         }
     }
 }
 
 public class ClientRateLimit
 {
+    private readonly object _lock = new();
     private readonly Dictionary<string, Queue<DateTime>> _messageTimes = new();
     private readonly List<string> _violations = new();
     private DateTime _lastActivity = DateTime.UtcNow;
 
-    public int ViolationCount => _violations.Count;
+    public int ViolationCount
+    {
+        get { lock (_lock) { return _violations.Count; } }
+    }
 
     public bool IsAllowed(string messageType)
     {
-        _lastActivity = DateTime.UtcNow;
-
-        if (!_messageTimes.TryGetValue(messageType, out var times))
+        lock (_lock)
         {
-            times = new Queue<DateTime>();
-            _messageTimes[messageType] = times;
-        }
+            _lastActivity = DateTime.UtcNow;
 
-        while (times.Count > 0 && (DateTime.UtcNow - times.Peek()).TotalMinutes > 1)
-        {
-            times.Dequeue();
-        }
+            if (!_messageTimes.TryGetValue(messageType, out var times))
+            {
+                times = new Queue<DateTime>();
+                _messageTimes[messageType] = times;
+            }
 
-        var limit = GetRateLimit(messageType);
-        if (times.Count >= limit)
-        {
-            RecordViolation($"Rate limit exceeded for {messageType}");
-            return false;
-        }
+            while (times.Count > 0 && (DateTime.UtcNow - times.Peek()).TotalMinutes > 1)
+            {
+                times.Dequeue();
+            }
 
-        times.Enqueue(DateTime.UtcNow);
-        return true;
+            var limit = GetRateLimit(messageType);
+            if (times.Count >= limit)
+            {
+                RecordViolationInternal($"Rate limit exceeded for {messageType}");
+                return false;
+            }
+
+            times.Enqueue(DateTime.UtcNow);
+            return true;
+        }
     }
 
     public void RecordViolation(string reason)
+    {
+        lock (_lock)
+        {
+            RecordViolationInternal(reason);
+        }
+    }
+
+    private void RecordViolationInternal(string reason)
     {
         _violations.Add($"{DateTime.UtcNow}: {reason}");
 
@@ -98,11 +107,17 @@ public class ClientRateLimit
         }
     }
 
-    public bool ShouldBeBanned() => _violations.Count >= 5;
+    public bool ShouldBeBanned()
+    {
+        lock (_lock) { return _violations.Count >= 5; }
+    }
 
-    public bool IsExpired() => (DateTime.UtcNow - _lastActivity).TotalMinutes > 10;
+    public bool IsExpired()
+    {
+        lock (_lock) { return (DateTime.UtcNow - _lastActivity).TotalMinutes > 10; }
+    }
 
-    private int GetRateLimit(string messageType)
+    private static int GetRateLimit(string messageType)
     {
         return messageType.ToLower() switch
         {
@@ -112,6 +127,10 @@ public class ClientRateLimit
             "loot_grab" => 30,
             "use_item" => 20,
             "ping" => 6,
+            // Server pings every 30 frames at 60fps = 2/sec = 120/min, allow 2x margin
+            "server_pong" => 240,
+            "heartbeat" => 120,
+            "message_ack" => 240,
             _ => 60
         };
     }

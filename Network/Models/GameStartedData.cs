@@ -22,4 +22,7 @@ public class GameStartedData
 
     [Key(4)]
     public List<string> Instructions { get; set; } = new();
+
+    [Key(5)]
+    public List<RoomInfoData> Rooms { get; set; } = new();
 }

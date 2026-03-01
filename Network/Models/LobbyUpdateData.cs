@@ -28,4 +28,15 @@ public class LobbyUpdateData
 
     [Key(6)]
     public string Status { get; set; } = "waiting";
+
+    [Key(7)]
+    public List<LobbyPlayerInfo> Players { get; set; } = new();
+}
+
+[MessagePackObject(keyAsPropertyName: false)]
+public class LobbyPlayerInfo
+{
+    [Key(0)] public string PlayerName { get; set; } = string.Empty;
+    [Key(1)] public string PlayerClass { get; set; } = string.Empty;
+    [Key(2)] public string TeamId { get; set; } = string.Empty;
 }

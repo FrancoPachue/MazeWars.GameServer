@@ -30,4 +30,14 @@ public class LootItem
     /// Gold value of the item
     /// </summary>
     public int Value { get; set; }
+
+    /// <summary>
+    /// Stack count for stackable items (consumables, potions, keys). Default 1.
+    /// </summary>
+    public int StackCount { get; set; } = 1;
+
+    /// <summary>
+    /// Weight of a single unit of this item.
+    /// </summary>
+    public float Weight { get; set; } = 0.5f;
 }

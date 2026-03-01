@@ -19,4 +19,7 @@ public class ClientConnectData
 
     [Key(3)]
     public string AuthToken { get; set; } = string.Empty;
+
+    [Key(4)]
+    public string GameMode { get; set; } = "trios";
 }

@@ -29,6 +29,11 @@ public interface ILootSystem : IDisposable
     LootItem CreateLootItem(LootDrop drop, Room room, Vector2? overridePosition = null);
 
     /// <summary>
+    /// Creates a valuable item (gem, jewel, artifact) for treasure rooms.
+    /// </summary>
+    LootItem CreateValuableItem(Room room, Vector2? position = null);
+
+    /// <summary>
     /// Spawns random loot in available rooms
     /// </summary>
     void SpawnRandomLoot(GameWorld world);
@@ -50,7 +55,7 @@ public interface ILootSystem : IDisposable
     /// <summary>
     /// Drops loot when a player dies
     /// </summary>
-    List<LootItem> DropPlayerLoot(RealTimePlayer deadPlayer, GameWorld world, int maxItemsToDrop = 3);
+    List<LootItem> DropPlayerLoot(RealTimePlayer deadPlayer, GameWorld world);
 
     /// <summary>
     /// Uses an item from player's inventory
@@ -61,6 +66,16 @@ public interface ILootSystem : IDisposable
     /// Validates if a player can grab specific loot
     /// </summary>
     bool CanPlayerGrabLoot(RealTimePlayer player, LootItem loot, GameWorld world);
+
+    /// <summary>
+    /// Grabs a specific item from a loot container
+    /// </summary>
+    LootGrabResult GrabFromContainer(RealTimePlayer player, string containerId, string lootId, GameWorld world);
+
+    /// <summary>
+    /// Removes expired containers from the world
+    /// </summary>
+    void CleanupExpiredContainers(GameWorld world);
 
     // =============================================
     // LOOT DISTRIBUTION AND RARITY
@@ -199,4 +214,8 @@ public interface ILootSystem : IDisposable
     /// Event fired when a player uses an item
     /// </summary>
     event Action<RealTimePlayer, LootItem, ItemUseResult>? OnItemUsed; // player, item, result
+
+    event Action<string, LootContainer>? OnContainerSpawned; // worldId, container
+    event Action<string, LootContainer>? OnContainerUpdated; // worldId, container
+    event Action<string, string>? OnContainerRemoved; // worldId, containerId
 }

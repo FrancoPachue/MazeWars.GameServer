@@ -25,4 +25,10 @@ public class ReliableMessage
 
     [Key(5)]
     public bool RequiresAck { get; set; } = true;
+
+    /// <summary>
+    /// Target player ID for retry resolution. Server-side only, not serialized over network.
+    /// </summary>
+    [IgnoreMember]
+    public string TargetPlayerId { get; set; } = string.Empty;
 }

@@ -20,4 +20,20 @@ public class ConnectedClient
 
     // ⭐ RECONNECTION: Session token for reconnection handling
     public string SessionToken { get; set; } = string.Empty;
+
+    // RTT tracking
+    public float RttMs { get; set; } = 0f;
+    public float RttVariance { get; set; } = 0f;
+    public uint LastPingId { get; set; } = 0;
+    public DateTime LastPingSentAt { get; set; }
+    public float PacketLossRate { get; set; } = 0f;
+
+    // Congestion control
+    public int SendFrameSkip { get; set; } = 1;
+    public DateTime LastCongestionAdjustment { get; set; } = DateTime.UtcNow;
+
+    // Anti-cheat auto-kick
+    public int CheatViolations { get; set; } = 0;
+    public DateTime FirstViolationAt { get; set; }
+    public DateTime LastViolationAt { get; set; }
 }

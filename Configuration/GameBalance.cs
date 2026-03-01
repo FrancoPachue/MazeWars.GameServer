@@ -20,7 +20,7 @@ public class GameBalance
     public int AttackCooldownMs { get; set; } = 1000;
 
     [Range(5, 300)]
-    public int ExtractionTimeSeconds { get; set; } = 30;
+    public int ExtractionTimeSeconds { get; set; } = 20;
 
     [Range(5, 50)]
     public int MaxInventorySize { get; set; } = 20;
@@ -29,4 +29,18 @@ public class GameBalance
     public int MaxTeamSize { get; set; } = 6;
     public int BaseExperiencePerLevel { get; set; } = 1000;
     public float ExperienceMultiplier { get; set; } = 1.5f;
+
+    // ── Weight / Encumbrance ──
+    public float PlayerCarryCapacity { get; set; } = 50f;
+    public float OverweightSpeedPenalty { get; set; } = 0.5f; // Minimum speed multiplier at 2x capacity
+
+    // ── Corruption Zone ──
+    public float CorruptionDelaySeconds { get; set; } = 300f;
+    public float CorruptionWaveIntervalSeconds { get; set; } = 120f;
+    public float CorruptionWarningSeconds { get; set; } = 30f;
+    public int CorruptionDamageBase { get; set; } = 5;
+    public float CorruptionDamageScale { get; set; } = 2f;
+
+    // ── Revival ──
+    public float RevivalChannelSeconds { get; set; } = 3.0f;
 }

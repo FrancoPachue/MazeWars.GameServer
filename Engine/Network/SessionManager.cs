@@ -1,3 +1,4 @@
+using MazeWars.GameServer.Engine.Equipment.Models;
 using MazeWars.GameServer.Models;
 using System.Collections.Concurrent;
 
@@ -17,6 +18,15 @@ public class SessionManager
     {
         _logger = logger;
         _sessionTTL = sessionTTL ?? TimeSpan.FromMinutes(5); // Default: 5 minutes to reconnect
+    }
+
+    /// <summary>
+    /// Thread-safe snapshot of a list to avoid cross-thread enumeration issues.
+    /// </summary>
+    private static List<T> SnapshotList<T>(List<T> source)
+    {
+        try { return new List<T>(source); }
+        catch (InvalidOperationException) { return new List<T>(); } // Collection was modified during copy
     }
 
     /// <summary>
@@ -88,21 +98,40 @@ public class SessionManager
             // Progression
             Level = player.Level,
             ExperiencePoints = player.ExperiencePoints,
-            Stats = new Dictionary<string, int>(player.Stats),
 
-            // Inventory (deep copy)
-            Inventory = player.Inventory.Select(item => new LootItem
+            // Inventory (deep copy with snapshot to avoid cross-thread enumeration issues)
+            Inventory = SnapshotList(player.Inventory).Select(item => new LootItem
             {
                 ItemId = item.ItemId,
                 ItemName = item.ItemName,
                 ItemType = item.ItemType,
                 Rarity = item.Rarity,
                 Stats = new Dictionary<string, int>(item.Stats),
+                Properties = new Dictionary<string, object>(item.Properties),
                 Value = item.Value
             }).ToList(),
 
-            // Active effects
-            StatusEffects = player.StatusEffects.Select(effect => new StatusEffect
+            // Equipment (deep copy)
+            Equipment = new Dictionary<EquipmentSlot, LootItem>(
+                player.Equipment.Select(kvp => new KeyValuePair<EquipmentSlot, LootItem>(
+                    kvp.Key,
+                    new LootItem
+                    {
+                        ItemId = kvp.Value.ItemId,
+                        ItemName = kvp.Value.ItemName,
+                        ItemType = kvp.Value.ItemType,
+                        Rarity = kvp.Value.Rarity,
+                        Stats = new Dictionary<string, int>(kvp.Value.Stats),
+                        Properties = new Dictionary<string, object>(kvp.Value.Properties),
+                        Value = kvp.Value.Value
+                    }
+                ))
+            ),
+            EquipmentBonusHealth = player.EquipmentBonusHealth,
+            EquipmentBonusMana = player.EquipmentBonusMana,
+
+            // Active effects (snapshot to avoid cross-thread enumeration issues)
+            StatusEffects = SnapshotList(player.StatusEffects).Select(effect => new StatusEffect
             {
                 EffectType = effect.EffectType,
                 Value = effect.Value,
@@ -314,10 +343,12 @@ public class SavedPlayerState
     // Progression
     public required int Level { get; set; }
     public required int ExperiencePoints { get; set; }
-    public required Dictionary<string, int> Stats { get; set; }
 
-    // Inventory
+    // Inventory & Equipment
     public required List<LootItem> Inventory { get; set; }
+    public required Dictionary<EquipmentSlot, LootItem> Equipment { get; set; }
+    public int EquipmentBonusHealth { get; set; }
+    public int EquipmentBonusMana { get; set; }
 
     // Active effects
     public required List<StatusEffect> StatusEffects { get; set; }

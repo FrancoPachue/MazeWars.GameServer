@@ -1,19 +1,20 @@
-﻿
+using MazeWars.GameServer.Engine.Loot.Models;
+
 // =============================================
 // LOOT DISTRIBUTION WEIGHTS
 // =============================================
 
 public class LootDistribution
 {
-    public Dictionary<LootQuality, float> QualityWeights { get; set; } = new()
+    public Dictionary<ItemRarity, float> QualityWeights { get; set; } = new()
     {
-        { LootQuality.Trash, 0.4f },
-        { LootQuality.Common, 0.3f },
-        { LootQuality.Uncommon, 0.2f },
-        { LootQuality.Rare, 0.08f },
-        { LootQuality.Epic, 0.015f },
-        { LootQuality.Legendary, 0.004f },
-        { LootQuality.Mythic, 0.001f }
+        { ItemRarity.Trash, 0.4f },
+        { ItemRarity.Common, 0.3f },
+        { ItemRarity.Uncommon, 0.2f },
+        { ItemRarity.Rare, 0.08f },
+        { ItemRarity.Epic, 0.015f },
+        { ItemRarity.Legendary, 0.004f },
+        { ItemRarity.Mythic, 0.001f }
     };
 
     public Dictionary<ItemCategory, float> CategoryWeights { get; set; } = new()

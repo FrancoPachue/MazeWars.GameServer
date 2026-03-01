@@ -13,4 +13,17 @@ public class MovementSettings
     public float TeleportMaxDistance { get; set; } = 15.0f;
     public bool EnableCollisionPrediction { get; set; } = true;
     public float CollisionPredictionTime { get; set; } = 0.1f; // seconds ahead
+
+    // Click-to-move
+    public float ArrivalThreshold { get; set; } = 0.15f;
+    public float SteeringSmoothing { get; set; } = 0.15f;
+
+    // Room/corridor boundaries
+    public float CorridorWidth { get; set; } = 8f;
+
+    // Extracted from hardcoded values
+    public float SpeedToleranceMultiplier { get; set; } = 1.2f;
+    public float TeleportSuspicionLevel { get; set; } = 0.5f;
+    public float WorldSize { get; set; } = 240f;
+    public int SpatialGridCellSize { get; set; } = 32;
 }

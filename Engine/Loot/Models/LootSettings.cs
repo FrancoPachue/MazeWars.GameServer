@@ -16,4 +16,5 @@ public class LootSettings
     public int MaxDropsPerRoom { get; set; } = 5;
     public bool EnableLootMagnetism { get; set; } = false;
     public float MagnetismRange { get; set; } = 1.5f;
+    public float ItemDestructionRate { get; set; } = 0.25f; // 25% of items destroyed on player death
 }

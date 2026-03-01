@@ -47,26 +47,29 @@ public class LobbyManager
     // =============================================
 
     /// <summary>
-    /// Find an available lobby for a team or create a new one.
+    /// Find an available lobby for a team or create a new one, filtered by game mode.
     /// </summary>
-    public string FindOrCreateLobby(string teamId)
+    public string FindOrCreateLobby(string teamId, string gameMode = "trios")
     {
+        var modeConfig = _settings.GameModes.GetValueOrDefault(gameMode);
+
         lock (_lobbiesLock)
         {
-            // Try to find an available lobby
-            foreach (var lobby in _worldLobbies.Values.Where(l => l.Status == LobbyStatus.WaitingForPlayers))
+            // Try to find an available lobby matching the game mode
+            foreach (var lobby in _worldLobbies.Values.Where(l =>
+                l.Status == LobbyStatus.WaitingForPlayers && l.GameMode == gameMode))
             {
-                if (CanJoinLobby(lobby, teamId))
+                if (CanJoinLobby(lobby, teamId, modeConfig))
                 {
-                    _logger.LogInformation("Found available lobby {LobbyId} for team {TeamId}",
-                        lobby.LobbyId, teamId);
+                    _logger.LogInformation("Found available lobby {LobbyId} for team {TeamId} (mode: {GameMode})",
+                        lobby.LobbyId, teamId, gameMode);
                     return lobby.LobbyId;
                 }
             }
 
             // Create new lobby if none available
-            var newLobbyId = CreateNewLobby();
-            _logger.LogInformation("Created new lobby {LobbyId} for team {TeamId}", newLobbyId, teamId);
+            var newLobbyId = CreateNewLobby(gameMode, modeConfig);
+            _logger.LogInformation("Created new lobby {LobbyId} for team {TeamId} (mode: {GameMode})", newLobbyId, teamId, gameMode);
             return newLobbyId;
         }
     }
@@ -74,33 +77,37 @@ public class LobbyManager
     /// <summary>
     /// Check if a team can join a specific lobby.
     /// </summary>
-    private bool CanJoinLobby(WorldLobby lobby, string teamId)
+    private bool CanJoinLobby(WorldLobby lobby, string teamId, GameModeConfig? modeConfig = null)
     {
+        var maxPlayers = modeConfig?.MaxPlayersPerLobby ?? _settings.MaxPlayersPerWorld;
+        var maxTeamSizeAllowed = modeConfig?.MaxTeamSize ?? _settings.GameBalance.MaxTeamSize;
+
         // Check lobby capacity
-        if (lobby.TotalPlayers >= _settings.MaxPlayersPerWorld)
+        if (lobby.TotalPlayers >= maxPlayers)
             return false;
 
         // Check team capacity
         if (!lobby.TeamPlayerCounts.TryGetValue(teamId, out var teamCount))
             teamCount = 0;
 
-        if (teamCount >= _settings.GameBalance.MaxTeamSize)
+        if (teamCount >= maxTeamSizeAllowed)
             return false;
 
         // Prevent new teams from joining if other teams are already at max size
-        var maxTeamSize = lobby.TeamPlayerCounts.Values.DefaultIfEmpty(0).Max();
-        if (teamCount == 0 && maxTeamSize >= _settings.GameBalance.MaxTeamSize)
+        var currentMaxTeamSize = lobby.TeamPlayerCounts.Values.DefaultIfEmpty(0).Max();
+        if (teamCount == 0 && currentMaxTeamSize >= maxTeamSizeAllowed)
             return false;
 
         return true;
     }
 
     /// <summary>
-    /// Create a new lobby.
+    /// Create a new lobby for a specific game mode.
     /// </summary>
-    private string CreateNewLobby()
+    private string CreateNewLobby(string gameMode = "trios", GameModeConfig? modeConfig = null)
     {
         var lobbyId = Guid.NewGuid().ToString();
+        var maxPlayers = modeConfig?.MaxPlayersPerLobby ?? _settings.MaxPlayersPerWorld;
 
         var lobby = new WorldLobby
         {
@@ -108,16 +115,17 @@ public class LobbyManager
             Status = LobbyStatus.WaitingForPlayers,
             CreatedAt = DateTime.UtcNow,
             LastPlayerJoined = DateTime.UtcNow,
-            MinPlayersToStart = Math.Max(2, _settings.MinPlayersPerWorld),
-            MaxPlayers = _settings.MaxPlayersPerWorld,
+            MinPlayersToStart = Math.Max(1, _settings.MinPlayersPerWorld),
+            MaxPlayers = maxPlayers,
             TeamPlayerCounts = new Dictionary<string, int>(),
-            TotalPlayers = 0
+            TotalPlayers = 0,
+            GameMode = gameMode
         };
 
         _worldLobbies[lobbyId] = lobby;
 
-        _logger.LogDebug("Created lobby {LobbyId} (Min: {Min}, Max: {Max})",
-            lobbyId, lobby.MinPlayersToStart, lobby.MaxPlayers);
+        _logger.LogDebug("Created lobby {LobbyId} (Min: {Min}, Max: {Max}, Mode: {Mode})",
+            lobbyId, lobby.MinPlayersToStart, lobby.MaxPlayers, gameMode);
 
         return lobbyId;
     }
@@ -303,9 +311,9 @@ public class LobbyManager
             return;
         }
 
-        // RULE 2: Start after wait time if minimum players + multiple teams
+        // RULE 2: Start after wait time if minimum players reached
         var teamsCount = lobby.TeamPlayerCounts.Count;
-        if (lobby.TotalPlayers >= lobby.MinPlayersToStart && teamsCount >= 2)
+        if (lobby.TotalPlayers >= lobby.MinPlayersToStart)
         {
             var timeSinceLastJoin = DateTime.UtcNow - lobby.LastPlayerJoined;
 

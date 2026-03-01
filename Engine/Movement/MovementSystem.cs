@@ -20,6 +20,7 @@ public class MovementSystem : IMovementSystem
     // Spatial optimization
     private readonly Dictionary<string, SpatialGrid> _worldSpatialGrids = new();
     private readonly Dictionary<string, Dictionary<string, RoomBounds>> _worldRoomBounds = new();
+    private readonly Dictionary<string, List<CorridorBounds>> _worldCorridorBounds = new();
 
     // Anti-cheat tracking
     private readonly Dictionary<string, PlayerMovementTracker> _playerTrackers = new();
@@ -54,17 +55,54 @@ public class MovementSystem : IMovementSystem
 
     public bool IsValidPosition(GameWorld world, Vector2 position)
     {
-        var worldSize = CalculateWorldSize(world);
+        var roomBounds = GetOrCreateRoomBounds(world);
 
-        // Check world boundaries
-        if (position.X < -worldSize || position.X > worldSize ||
-            position.Y < -worldSize || position.Y > worldSize)
+        // Check if inside any room
+        foreach (var bounds in roomBounds.Values)
         {
-            return false;
+            if (position.X >= bounds.MinBounds.X && position.X <= bounds.MaxBounds.X &&
+                position.Y >= bounds.MinBounds.Y && position.Y <= bounds.MaxBounds.Y)
+                return true;
         }
 
-        // Additional validation can be added here (obstacles, walls, etc.)
-        return true;
+        // Check if inside any corridor between connected rooms
+        var corridors = GetOrCreateCorridorBounds(world);
+        foreach (var corridor in corridors)
+        {
+            if (position.X >= corridor.MinBounds.X && position.X <= corridor.MaxBounds.X &&
+                position.Y >= corridor.MinBounds.Y && position.Y <= corridor.MaxBounds.Y)
+            {
+                // Block if corridor has a locked door (entire corridor blocked)
+                if (corridor.ConnectionId != null &&
+                    world.LockedDoors.TryGetValue(corridor.ConnectionId, out var door) &&
+                    door.IsLocked)
+                    return false;
+
+                // For closed doors: block a thin strip at the door position
+                // Uses room-centers midpoint (matches client door visual position)
+                if (corridor.ConnectionId != null &&
+                    world.Doors.TryGetValue(corridor.ConnectionId, out var roomDoor) &&
+                    !roomDoor.IsOpen)
+                {
+                    const float doorBlockThickness = 0.5f;
+
+                    if (corridor.IsHorizontal)
+                    {
+                        if (Math.Abs(position.X - corridor.DoorMidpoint.X) < doorBlockThickness)
+                            return false;
+                    }
+                    else
+                    {
+                        if (Math.Abs(position.Y - corridor.DoorMidpoint.Y) < doorBlockThickness)
+                            return false;
+                    }
+                }
+
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public bool IsValidMovementInput(PlayerInputMessage input, RealTimePlayer player)
@@ -94,22 +132,39 @@ public class MovementSystem : IMovementSystem
     {
         var validation = new MovementValidation { IsValid = true };
 
-        // Check input magnitude
-        if (input.MoveInput.Magnitude > _movementSettings.MaxInputMagnitude)
+        // Click-to-move: validate target position is within world bounds
+        if (input.HasMoveTarget)
         {
-            validation.IsValid = false;
-            validation.ValidationError = "Movement input magnitude too high";
-            validation.SuspicionLevel = Math.Min(1.0f, input.MoveInput.Magnitude - 1.0f);
-            validation.ValidationFlags.Add("HIGH_MAGNITUDE");
-            return validation;
+            var worldSize = _movementSettings.WorldSize;
+            if (Math.Abs(input.MoveTarget.X) > worldSize + 10 ||
+                Math.Abs(input.MoveTarget.Y) > worldSize + 10)
+            {
+                validation.IsValid = false;
+                validation.ValidationError = "Move target outside world bounds";
+                validation.SuspicionLevel = 0.8f;
+                validation.ValidationFlags.Add("INVALID_TARGET");
+                return validation;
+            }
         }
 
         // Check for impossible speeds based on movement history
         var tracker = GetOrCreatePlayerTracker(player.PlayerId);
+
+        // Skip speed/teleport checks for a grace period after a dash ability
+        var timeSinceDash = (DateTime.UtcNow - player.LastDashTime).TotalMilliseconds;
+        if (timeSinceDash < 500)
+        {
+            // Player just dashed — reset tracker to avoid stale history contaminating future checks
+            tracker.RecentPositions.Clear();
+            tracker.PositionTimestamps.Clear();
+            tracker.AddPosition(player.Position);
+            return validation;
+        }
+
         tracker.AddPosition(player.Position);
 
         var averageSpeed = tracker.CalculateAverageSpeed();
-        var maxAllowedSpeed = CalculateMovementSpeed(player, true) * 1.2f; // 20% tolerance
+        var maxAllowedSpeed = CalculateMovementSpeed(player, true) * _movementSettings.SpeedToleranceMultiplier;
 
         if (averageSpeed > maxAllowedSpeed)
         {
@@ -132,7 +187,7 @@ public class MovementSystem : IMovementSystem
 
             if (timeDiff > 0 && distance / timeDiff > maxAllowedSpeed * 2)
             {
-                validation.SuspicionLevel += 0.5f;
+                validation.SuspicionLevel += _movementSettings.TeleportSuspicionLevel;
                 validation.ValidationFlags.Add("TELEPORT_DETECTED");
             }
         }
@@ -155,7 +210,7 @@ public class MovementSystem : IMovementSystem
 
         if (!player.IsAlive || player.IsCasting)
         {
-            result.ErrorMessage = "Player cannot move";
+            // No error message: casting/dead is a normal state, not suspicious
             return result;
         }
 
@@ -166,59 +221,33 @@ public class MovementSystem : IMovementSystem
             return result;
         }
 
-        // Process movement input
-        if (input.MoveInput.Magnitude > _movementSettings.MinMovementThreshold)
+        // Click-to-move: process new target if client sent a click
+        if (input.HasMoveTarget)
         {
-            var speed = CalculateMovementSpeed(player, input.IsSprinting);
-
-            // Handle sprinting mana cost
-            if (input.IsSprinting && player.Mana > 0)
+            var target = input.MoveTarget;
+            if (IsValidPosition(world, target))
             {
-                var manaCost = (int)(_movementSettings.ManaCostPerSprintSecond * deltaTime);
-                player.Mana = Math.Max(0, player.Mana - manaCost);
-            }
-            else
-            {
-                input.IsSprinting = false; // Can't sprint without mana
-            }
-
-            var normalizedInput = input.MoveInput.GetNormalized();
-            var newVelocity = normalizedInput * speed;
-
-            // Calculate new position
-            var newPosition = player.Position + newVelocity * deltaTime;
-
-            // Validate new position
-            if (IsValidPosition(world, newPosition))
-            {
-                result.NewPosition = newPosition;
-                result.NewVelocity = newVelocity;
-                result.PositionChanged = true;
-                player.IsMoving = true;
-                player.IsSprinting = input.IsSprinting;
-            }
-            else
-            {
-                // Position invalid - clamp to bounds
-                result.NewPosition = ClampToWorldBounds(newPosition, world);
-                result.NewVelocity = Vector2.Zero;
-                result.CollisionDetected = true;
-                result.CollidedWith.Add("WorldBoundary");
-                player.IsMoving = false;
-                player.IsSprinting = false;
+                player.MoveTarget = target;
+                player.IsPathing = true;
             }
         }
-        else
+
+        // Stop command (S key or click on self)
+        if (input.StopMovement)
         {
-            // No movement input
-            result.NewVelocity = Vector2.Zero;
+            player.MoveTarget = null;
+            player.IsPathing = false;
+            player.Velocity = Vector2.Zero;
             player.IsMoving = false;
-            player.IsSprinting = false;
         }
 
-        // Update player direction
+        // Set sprint state from input
+        player.IsSprinting = input.IsSprinting && player.Mana > 0;
+
+        // Aim direction is independent from movement (like LoL)
         player.Direction = input.AimDirection;
 
+        // Position is NOT updated here — UpdateAllPlayersMovement handles movement
         result.Success = true;
         return result;
     }
@@ -231,18 +260,86 @@ public class MovementSystem : IMovementSystem
         {
             if (!player.IsAlive || player.IsCasting) continue;
 
-            var newPosition = player.Position + player.Velocity * deltaTime;
+            // Click-to-move: continuous steering toward target
+            if (player.IsPathing && player.MoveTarget.HasValue)
+            {
+                var toTarget = player.MoveTarget.Value - player.Position;
+                var distance = toTarget.Magnitude;
 
-            if (IsValidPosition(world, newPosition))
-            {
-                player.Position = newPosition;
+                if (distance <= _movementSettings.ArrivalThreshold)
+                {
+                    player.MoveTarget = null;
+                    player.IsPathing = false;
+                    player.Velocity = Vector2.Zero;
+                    player.IsMoving = false;
+                    player.IsSprinting = false;
+                }
+                else
+                {
+                    // Sprint mana cost
+                    if (player.IsSprinting && player.Mana > 0)
+                    {
+                        var manaCost = (int)(_movementSettings.ManaCostPerSprintSecond * deltaTime);
+                        player.Mana = Math.Max(0, player.Mana - manaCost);
+                    }
+                    else
+                    {
+                        player.IsSprinting = false;
+                    }
+
+                    var speed = CalculateMovementSpeed(player, player.IsSprinting);
+                    var direction = toTarget.GetNormalized();
+                    var desiredVelocity = direction * speed;
+
+                    // Smooth steering to avoid jerky direction changes
+                    if (_movementSettings.SteeringSmoothing > 0 && player.Velocity.Magnitude > 0.1f)
+                    {
+                        var t = Math.Min(1f, deltaTime / _movementSettings.SteeringSmoothing);
+                        player.Velocity = Vector2.Lerp(player.Velocity, desiredVelocity, t);
+                    }
+                    else
+                    {
+                        player.Velocity = desiredVelocity;
+                    }
+                    player.IsMoving = true;
+                }
             }
-            else
+
+            // Apply velocity
+            if (player.Velocity.Magnitude > 0.01f)
             {
-                player.Position = ClampToWorldBounds(player.Position, world);
-                player.Velocity = Vector2.Zero;
-                player.IsMoving = false;
-                stats.CollisionsDetected++;
+                var newPosition = player.Position + player.Velocity * deltaTime;
+
+                if (IsValidPosition(world, newPosition))
+                {
+                    player.Position = newPosition;
+                }
+                else
+                {
+                    // Wall collision: try sliding along each axis separately
+                    var slideX = new Vector2(newPosition.X, player.Position.Y);
+                    var slideY = new Vector2(player.Position.X, newPosition.Y);
+
+                    if (IsValidPosition(world, slideX))
+                    {
+                        player.Position = slideX;
+                        player.Velocity = new Vector2(player.Velocity.X, 0);
+                    }
+                    else if (IsValidPosition(world, slideY))
+                    {
+                        player.Position = slideY;
+                        player.Velocity = new Vector2(0, player.Velocity.Y);
+                    }
+                    else
+                    {
+                        // Completely blocked by wall
+                        player.Velocity = Vector2.Zero;
+                        player.IsMoving = false;
+                        player.MoveTarget = null;
+                        player.IsPathing = false;
+                        stats.CollisionsDetected++;
+                    }
+                }
             }
 
             stats.TotalMovementUpdates++;
@@ -267,10 +364,24 @@ public class MovementSystem : IMovementSystem
             "scout" => 1.1f,
             "tank" => 0.9f,
             "support" => 1.0f,
+            "assassin" => 1.15f,
+            "warlock" => 0.95f,
             _ => 1.0f
         };
 
-        return baseSpeed * classModifier;
+        var speed = baseSpeed * classModifier;
+
+        // Apply weight penalty: linear from 1.0x at capacity to MinPenalty at 2x capacity
+        var capacity = _settings.GameBalance.PlayerCarryCapacity;
+        if (capacity > 0 && player.CurrentWeight > capacity)
+        {
+            var overweightRatio = Math.Min((player.CurrentWeight - capacity) / capacity, 1.0f);
+            var minMultiplier = _settings.GameBalance.OverweightSpeedPenalty;
+            var weightMultiplier = 1.0f - overweightRatio * (1.0f - minMultiplier);
+            speed *= weightMultiplier;
+        }
+
+        return speed;
     }
 
     // =============================================
@@ -299,7 +410,7 @@ public class MovementSystem : IMovementSystem
             // Resolve collisions
             foreach (var collision in collisions)
             {
-                ResolveCollision(player, collision);
+                ResolveCollision(player, collision, world);
                 stats.CollisionsDetected++;
             }
         }
@@ -320,6 +431,7 @@ public class MovementSystem : IMovementSystem
                 {
                     foreach (var mobId in mobIds)
                     {
+                        if (string.IsNullOrEmpty(mobId)) continue;
                         if (world.Mobs.TryGetValue(mobId, out var mob) &&
                             mob.Health > 0 &&
                             mob.RoomId == player.CurrentRoomId)
@@ -392,17 +504,40 @@ public class MovementSystem : IMovementSystem
         };
     }
 
-    private void ResolveCollision(RealTimePlayer player, CollisionInfo collision)
+    private void ResolveCollision(RealTimePlayer player, CollisionInfo collision, GameWorld world)
     {
-        var pushDistance = Math.Max(0.1f, collision.PenetrationDepth);
+        // Only affect players who are moving toward the collision
+        // A stationary player won't be pushed by someone walking into them
+        var dot = Vector2.Dot(player.Velocity, collision.CollisionNormal);
+        if (collision.Type == CollisionType.Player && dot >= 0)
+            return; // Not moving toward this player, skip
+
+        var pushDistance = Math.Max(0.05f, collision.PenetrationDepth);
         var pushVector = collision.CollisionNormal * pushDistance;
+        var pushedPosition = player.Position + pushVector;
 
-        player.Position += pushVector;
-
-        // Optionally apply some velocity damping
-        if (Vector2.Dot(player.Velocity, collision.CollisionNormal) < 0)
+        // Validate pushed position against room/corridor bounds
+        if (IsValidPosition(world, pushedPosition))
         {
-            player.Velocity -= collision.CollisionNormal * Vector2.Dot(player.Velocity, collision.CollisionNormal);
+            player.Position = pushedPosition;
+        }
+        else
+        {
+            // Try pushing along each axis separately (wall-aware)
+            var pushX = new Vector2(pushedPosition.X, player.Position.Y);
+            var pushY = new Vector2(player.Position.X, pushedPosition.Y);
+
+            if (IsValidPosition(world, pushX))
+                player.Position = pushX;
+            else if (IsValidPosition(world, pushY))
+                player.Position = pushY;
+            // else: can't push without entering a wall, skip push entirely
+        }
+
+        // Remove velocity component toward the collision (slide along surface)
+        if (dot < 0)
+        {
+            player.Velocity -= collision.CollisionNormal * dot;
         }
     }
 
@@ -461,12 +596,36 @@ public class MovementSystem : IMovementSystem
     {
         var roomBounds = GetOrCreateRoomBounds(world);
 
+        // Check if inside a room
         foreach (var (roomId, bounds) in roomBounds)
         {
             if (position.X >= bounds.MinBounds.X && position.X <= bounds.MaxBounds.X &&
                 position.Y >= bounds.MinBounds.Y && position.Y <= bounds.MaxBounds.Y)
             {
                 return roomId;
+            }
+        }
+
+        // Check corridors — return the closest connected room
+        // If one room is corrupted and the other isn't, prefer the safe room
+        // so players in corridors aren't stuck taking corruption damage
+        var corridors = GetOrCreateCorridorBounds(world);
+        foreach (var corridor in corridors)
+        {
+            if (position.X >= corridor.MinBounds.X && position.X <= corridor.MaxBounds.X &&
+                position.Y >= corridor.MinBounds.Y && position.Y <= corridor.MaxBounds.Y)
+            {
+                var aCorrupted = world.CorruptedRooms.Contains(corridor.RoomIdA);
+                var bCorrupted = world.CorruptedRooms.Contains(corridor.RoomIdB);
+
+                // If only one side is corrupted, prefer the safe side
+                if (aCorrupted && !bCorrupted) return corridor.RoomIdB;
+                if (bCorrupted && !aCorrupted) return corridor.RoomIdA;
+
+                // Both safe or both corrupted — use nearest center
+                var distA = Vector2.Distance(position, roomBounds[corridor.RoomIdA].Center);
+                var distB = Vector2.Distance(position, roomBounds[corridor.RoomIdB].Center);
+                return distA <= distB ? corridor.RoomIdA : corridor.RoomIdB;
             }
         }
 
@@ -577,9 +736,7 @@ public class MovementSystem : IMovementSystem
 
     private float CalculateWorldSize(GameWorld world)
     {
-        // This should come from world generation settings
-        // For now, using a reasonable default
-        return 240f; // Matches the existing logic in the original code
+        return _movementSettings.WorldSize;
     }
 
 
@@ -616,7 +773,7 @@ public class MovementSystem : IMovementSystem
         {
             grid = new SpatialGrid
             {
-                CellSize = 32 // 32 units per cell for optimal collision detection
+                CellSize = _movementSettings.SpatialGridCellSize
             };
             _worldSpatialGrids[worldId] = grid;
         }
@@ -659,6 +816,97 @@ public class MovementSystem : IMovementSystem
         return roomBounds;
     }
 
+    private List<CorridorBounds> GetOrCreateCorridorBounds(GameWorld world)
+    {
+        if (!_worldCorridorBounds.TryGetValue(world.WorldId, out var corridors))
+        {
+            corridors = new List<CorridorBounds>();
+            var halfCorridor = _movementSettings.CorridorWidth / 2f;
+            var processedPairs = new HashSet<string>();
+
+            foreach (var room in world.Rooms.Values)
+            {
+                foreach (var connectedRoomId in room.Connections)
+                {
+                    // Only process each pair once
+                    var pairKey = string.Compare(room.RoomId, connectedRoomId, StringComparison.Ordinal) < 0
+                        ? $"{room.RoomId}|{connectedRoomId}"
+                        : $"{connectedRoomId}|{room.RoomId}";
+
+                    if (!processedPairs.Add(pairKey)) continue;
+                    if (!world.Rooms.TryGetValue(connectedRoomId, out var otherRoom)) continue;
+
+                    var dx = otherRoom.Position.X - room.Position.X;
+                    var dy = otherRoom.Position.Y - room.Position.Y;
+
+                    CorridorBounds corridor;
+
+                    if (Math.Abs(dx) > Math.Abs(dy))
+                    {
+                        // Horizontal connection (rooms differ in X)
+                        var leftRoom = dx > 0 ? room : otherRoom;
+                        var rightRoom = dx > 0 ? otherRoom : room;
+                        var centerY = (leftRoom.Position.Y + rightRoom.Position.Y) / 2f;
+                        var leftWall = leftRoom.Position.X + leftRoom.Size.X / 2f;
+                        var rightWall = rightRoom.Position.X - rightRoom.Size.X / 2f;
+
+                        // Door at CENTER of corridor (midpoint between both room walls)
+                        var doorMidpoint = new Vector2(
+                            (leftWall + rightWall) / 2f,
+                            centerY);
+
+                        corridor = new CorridorBounds
+                        {
+                            MinBounds = new Vector2(leftWall, centerY - halfCorridor),
+                            MaxBounds = new Vector2(rightWall, centerY + halfCorridor),
+                            RoomIdA = leftRoom.RoomId,
+                            RoomIdB = rightRoom.RoomId,
+                            DoorMidpoint = doorMidpoint,
+                            IsHorizontal = true
+                        };
+                    }
+                    else
+                    {
+                        // Vertical connection (rooms differ in Y)
+                        var topRoom = dy > 0 ? room : otherRoom;
+                        var bottomRoom = dy > 0 ? otherRoom : room;
+                        var centerX = (topRoom.Position.X + bottomRoom.Position.X) / 2f;
+                        var topWall = topRoom.Position.Y + topRoom.Size.Y / 2f;
+                        var bottomWall = bottomRoom.Position.Y - bottomRoom.Size.Y / 2f;
+
+                        // Door at CENTER of corridor (midpoint between both room walls)
+                        var doorMidpoint = new Vector2(
+                            centerX,
+                            (topWall + bottomWall) / 2f);
+
+                        corridor = new CorridorBounds
+                        {
+                            MinBounds = new Vector2(centerX - halfCorridor, topWall),
+                            MaxBounds = new Vector2(centerX + halfCorridor, bottomWall),
+                            RoomIdA = topRoom.RoomId,
+                            RoomIdB = bottomRoom.RoomId,
+                            DoorMidpoint = doorMidpoint,
+                            IsHorizontal = false
+                        };
+                    }
+
+                    // Set connection ID for locked door checks
+                    var connId = string.Compare(room.RoomId, connectedRoomId, StringComparison.Ordinal) < 0
+                        ? $"{room.RoomId}_{connectedRoomId}" : $"{connectedRoomId}_{room.RoomId}";
+                    corridor.ConnectionId = connId;
+
+                    corridors.Add(corridor);
+                }
+            }
+
+            _worldCorridorBounds[world.WorldId] = corridors;
+            _logger.LogDebug("Cached {CorridorCount} corridor bounds for world {WorldId}",
+                corridors.Count, world.WorldId);
+        }
+
+        return corridors;
+    }
+
     private void UpdateSpatialGrid(GameWorld world)
     {
         var spatialGrid = GetOrCreateSpatialGrid(world.WorldId);
@@ -671,26 +919,16 @@ public class MovementSystem : IMovementSystem
         foreach (var player in world.Players.Values.Where(p => p.IsAlive))
         {
             var cellCoord = spatialGrid.GetCellCoords(player.Position);
-
-            if (!spatialGrid.PlayerCells.ContainsKey(cellCoord))
-            {
-                spatialGrid.PlayerCells[cellCoord] = new List<string>();
-            }
-
-            spatialGrid.PlayerCells[cellCoord].Add(player.PlayerId);
+            var list = spatialGrid.PlayerCells.GetOrAdd(cellCoord, _ => new List<string>());
+            list.Add(player.PlayerId);
         }
 
         // Add mobs to spatial grid
         foreach (var mob in world.Mobs.Values.Where(m => m.Health > 0))
         {
             var cellCoord = spatialGrid.GetCellCoords(mob.Position);
-
-            if (!spatialGrid.MobCells.ContainsKey(cellCoord))
-            {
-                spatialGrid.MobCells[cellCoord] = new List<string>();
-            }
-
-            spatialGrid.MobCells[cellCoord].Add(mob.MobId);
+            var list = spatialGrid.MobCells.GetOrAdd(cellCoord, _ => new List<string>());
+            list.Add(mob.MobId);
         }
     }
 
@@ -702,6 +940,7 @@ public class MovementSystem : IMovementSystem
     {
         _worldSpatialGrids.Remove(worldId);
         _worldRoomBounds.Remove(worldId);
+        _worldCorridorBounds.Remove(worldId);
         _worldStats.Remove(worldId);
 
         // Clean up player trackers for players no longer in any world
@@ -1058,6 +1297,7 @@ public class MovementSystem : IMovementSystem
     {
         _worldSpatialGrids.Clear();
         _worldRoomBounds.Clear();
+        _worldCorridorBounds.Clear();
         _playerTrackers.Clear();
         _worldStats.Clear();
 

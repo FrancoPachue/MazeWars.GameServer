@@ -21,6 +21,18 @@ public class CombatEvent
     [Key(4)]
     public Vector2 Position { get; set; }
 
-    [IgnoreMember] // Not serializable with MessagePack (Dictionary<string, object>)
+    [Key(5)]
+    public string RoomId { get; set; } = string.Empty;
+
+    [Key(6)]
+    public float Direction { get; set; }
+
+    [Key(7)]
+    public float Speed { get; set; }
+
+    [Key(8)]
+    public string AbilityId { get; set; } = string.Empty;
+
+    [IgnoreMember]
     public Dictionary<string, object> AdditionalData { get; internal set; }
 }

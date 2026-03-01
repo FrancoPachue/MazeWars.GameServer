@@ -8,4 +8,6 @@ public class CombatResult
     public string? ErrorMessage { get; set; }
     public List<CombatEvent> Events { get; set; } = new();
     public int TargetsHit { get; set; }
+    /// <summary>True when the attack spawned a projectile (handles mob targeting automatically).</summary>
+    public bool IsRangedProjectile { get; set; }
 }

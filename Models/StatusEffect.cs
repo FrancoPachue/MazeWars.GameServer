@@ -12,4 +12,9 @@ public class StatusEffect
     /// Duration in seconds (calculated from AppliedAt and ExpiresAt)
     /// </summary>
     public double Duration => (ExpiresAt - AppliedAt).TotalSeconds;
+
+    /// <summary>
+    /// Tracks last periodic tick time for DoT/HoT effects (poison, regen)
+    /// </summary>
+    public DateTime LastTickTime { get; set; } = DateTime.MinValue;
 }

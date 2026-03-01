@@ -17,4 +17,16 @@ public class MobUpdate
 
     [Key(3)]
     public int Health { get; set; }
+
+    [Key(4)]
+    public string RoomId { get; set; } = string.Empty;
+
+    [Key(5)]
+    public string MobType { get; set; } = string.Empty;
+
+    [Key(6)]
+    public int MaxHealth { get; set; }
+
+    [Key(7)]
+    public int Phase { get; set; }
 }

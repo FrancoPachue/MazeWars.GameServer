@@ -11,5 +11,6 @@ public enum MobAction
     Guard,
     Roar,
     Heal,
-    Summon
+    Summon,
+    RangedAttack
 }

@@ -97,7 +97,7 @@ public class WorldInteractionSystem : IWorldInteractionSystem
     {
         // Factor in player skills, lockpick quality, etc.
         var baseChance = 0.6f;
-        var skillBonus = player.Stats.GetValueOrDefault("agility", 10) * 0.02f;
+        var skillBonus = 0.2f; // Flat bonus (stats removed)
         var qualityBonus = lockpick.Rarity * 0.1f;
 
         var successChance = baseChance + skillBonus + qualityBonus;

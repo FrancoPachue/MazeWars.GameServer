@@ -102,17 +102,60 @@ public class ItemSystem : IItemSystem
             effectsApplied.Add($"Restored {actualMana} mana");
         }
 
-        // Status effects (delegar al combat system)
+        // Speed boost
         if (speedValue > 1.0f && durationValue > 0)
         {
             _combatSystem.ApplyStatusEffect(player, new StatusEffect
             {
-                EffectType = "speed",
-                Value = 0,
+                EffectType = "speed_boost",
+                Value = (int)speedValue,
                 ExpiresAt = DateTime.UtcNow.AddSeconds(durationValue),
                 SourcePlayerId = player.PlayerId
             });
-            effectsApplied.Add($"Speed boost {speedValue}x for {durationValue}s");
+            effectsApplied.Add($"Speed +{(int)speedValue}% for {durationValue}s");
+        }
+
+        // Shield
+        var shieldValue = item.Properties.TryGetValue("shield_amount", out var shield) ? Convert.ToInt32(shield) : 0;
+        if (shieldValue > 0)
+        {
+            var shieldDuration = durationValue > 0 ? durationValue : 15;
+            player.Shield += shieldValue;
+            _combatSystem.ApplyStatusEffect(player, new StatusEffect
+            {
+                EffectType = "shield",
+                Value = shieldValue,
+                ExpiresAt = DateTime.UtcNow.AddSeconds(shieldDuration),
+                SourcePlayerId = player.PlayerId
+            });
+            effectsApplied.Add($"Shield +{shieldValue} for {shieldDuration}s");
+        }
+
+        // Cleanse (remove negative effects)
+        var cleanseValue = item.Properties.TryGetValue("cleanse", out var cleanse) ? Convert.ToInt32(cleanse) : 0;
+        if (cleanseValue > 0)
+        {
+            var negativeEffects = player.StatusEffects
+                .Where(e => e.EffectType is "poison" or "bleed" or "slow" or "weaken" or "stun")
+                .ToList();
+            foreach (var effect in negativeEffects)
+                player.StatusEffects.Remove(effect);
+            player.MovementSpeedModifier = 1f + player.EquipmentSpeedBonus;
+            effectsApplied.Add($"Cleansed {negativeEffects.Count} effects");
+        }
+
+        // Damage boost
+        var damageBoostValue = item.Properties.TryGetValue("damage_boost", out var dmgBoost) ? Convert.ToInt32(dmgBoost) : 0;
+        if (damageBoostValue > 0 && durationValue > 0)
+        {
+            _combatSystem.ApplyStatusEffect(player, new StatusEffect
+            {
+                EffectType = "damage_boost",
+                Value = damageBoostValue,
+                ExpiresAt = DateTime.UtcNow.AddSeconds(durationValue),
+                SourcePlayerId = player.PlayerId
+            });
+            effectsApplied.Add($"Damage +{damageBoostValue}% for {durationValue}s");
         }
 
         return UseItemResult.Ok(string.Join(", ", effectsApplied), item);

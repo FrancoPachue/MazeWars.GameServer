@@ -12,35 +12,45 @@ public class PlayerMovementTracker
     public DateTime LastValidation { get; set; } = DateTime.UtcNow;
     public bool IsBeingMonitored { get; set; }
 
+    private readonly object _lock = new();
+
     public void AddPosition(Vector2 position)
     {
-        RecentPositions.Add(position);
-        PositionTimestamps.Add(DateTime.UtcNow);
-
-        // Keep only last 10 positions for analysis
-        while (RecentPositions.Count > 10)
+        lock (_lock)
         {
-            RecentPositions.RemoveAt(0);
-            PositionTimestamps.RemoveAt(0);
+            RecentPositions.Add(position);
+            PositionTimestamps.Add(DateTime.UtcNow);
+
+            // Keep only last 10 positions for analysis
+            while (RecentPositions.Count > 10)
+            {
+                RecentPositions.RemoveAt(0);
+                PositionTimestamps.RemoveAt(0);
+            }
         }
     }
 
     public float CalculateAverageSpeed()
     {
-        if (RecentPositions.Count < 2) return 0f;
-
-        float totalDistance = 0f;
-        float totalTime = 0f;
-
-        for (int i = 1; i < RecentPositions.Count; i++)
+        lock (_lock)
         {
-            var distance = Vector2.Distance(RecentPositions[i - 1], RecentPositions[i]);
-            var time = (float)(PositionTimestamps[i] - PositionTimestamps[i - 1]).TotalSeconds;
+            if (RecentPositions.Count < 2) return 0f;
 
-            totalDistance += distance;
-            totalTime += time;
+            float totalDistance = 0f;
+            float totalTime = 0f;
+
+            for (int i = 1; i < RecentPositions.Count; i++)
+            {
+                var distance = Vector2.Distance(RecentPositions[i - 1], RecentPositions[i]);
+                var time = (float)(PositionTimestamps[i] - PositionTimestamps[i - 1]).TotalSeconds;
+
+                totalDistance += distance;
+                totalTime += time;
+            }
+
+            // Need at least 50ms of data to calculate meaningful speed
+            // (avoids divide-by-near-zero on first frames after connect)
+            return totalTime > 0.05f ? totalDistance / totalTime : 0f;
         }
-
-        return totalTime > 0 ? totalDistance / totalTime : 0f;
     }
 }

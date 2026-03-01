@@ -38,4 +38,18 @@ public class PlayerInputMessage
 
     [Key(8)]
     public Vector2 AbilityTarget { get; set; }
+
+    // Click-to-move
+    [Key(9)]
+    public Vector2 MoveTarget { get; set; }
+
+    [Key(10)]
+    public bool HasMoveTarget { get; set; }
+
+    [Key(11)]
+    public bool StopMovement { get; set; }
+
+    // Selected target entity for auto-attacks
+    [Key(12)]
+    public string TargetEntityId { get; set; } = string.Empty;
 }

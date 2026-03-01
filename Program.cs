@@ -9,6 +9,8 @@ using Microsoft.Extensions.Options;
 using MazeWars.GameServer.Network.Services;
 using MazeWars.GameServer.Engine.Combat.Interface;
 using MazeWars.GameServer.Services.Combat;
+using MazeWars.GameServer.Engine.Equipment;
+using MazeWars.GameServer.Engine.Equipment.Interface;
 using MazeWars.GameServer.Engine.Loot.Interface;
 using MazeWars.GameServer.Services.Loot;
 using MazeWars.GameServer.Engine.Movement.Interface;
@@ -17,6 +19,10 @@ using MazeWars.GameServer.Engine.AI.Interface;
 using MazeWars.GameServer.Services.AI;
 using MazeWars.GameServer.Engine.Network;
 using MazeWars.GameServer.Engine.Managers;
+using MazeWars.GameServer.Engine.Stash;
+using MazeWars.GameServer.Data;
+using MazeWars.GameServer.Data.Repositories;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,20 +30,12 @@ var builder = WebApplication.CreateBuilder(args);
 // LOGGING CONFIGURATION
 // =============================================
 
-// Configure Serilog
+// Configure Serilog (appsettings.json already defines Console + File sinks via ReadFrom.Configuration)
 Log.Logger = new LoggerConfiguration()
     .ReadFrom.Configuration(builder.Configuration)
     .Enrich.FromLogContext()
     .Enrich.WithProperty("Application", "MazeWars.GameServer")
     .Enrich.WithProperty("Version", "1.0.0")
-    .WriteTo.Console(outputTemplate:
-        "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}")
-    .WriteTo.File(
-        path: "logs/mazewars-.log",
-        rollingInterval: RollingInterval.Day,
-        retainedFileCountLimit: 7,
-        outputTemplate:
-            "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:lj} {Properties:j}{NewLine}{Exception}")
     .CreateLogger();
 
 builder.Host.UseSerilog();
@@ -97,6 +95,9 @@ try
     // CORE SERVICES
     // =============================================
 
+    builder.Services.AddSingleton<IEquipmentSystem, EquipmentSystem>();
+
+    builder.Services.AddSingleton<ProjectileSystem>();
     builder.Services.AddSingleton<ICombatSystem,CombatSystem>();
 
     builder.Services.AddSingleton<IMovementSystem,MovementSystem>();
@@ -104,6 +105,13 @@ try
     builder.Services.AddSingleton<ILootSystem,LootSystem>();
 
     builder.Services.AddSingleton<IMobAISystem, MobAISystem>();
+
+    builder.Services.AddSingleton<StashService>();
+
+    // Database
+    builder.Services.AddDbContext<MazeWarsDbContext>(options =>
+        options.UseSqlite("Data Source=mazewars.db"));
+    builder.Services.AddSingleton<IPlayerRepository, PlayerRepository>();
 
     // ⭐ REFACTORED: Managers (Singleton - separated concerns for better maintainability)
     builder.Services.AddSingleton<LobbyManager>();       // Lobby lifecycle & matchmaking
@@ -210,6 +218,43 @@ try
     // =============================================
 
     var app = builder.Build();
+
+    // Auto-create/migrate SQLite database
+    using (var scope = app.Services.CreateScope())
+    {
+        var db = scope.ServiceProvider.GetRequiredService<MazeWarsDbContext>();
+        db.Database.EnsureCreated();
+
+        // Add columns that EnsureCreated won't add to existing tables
+        var conn = db.Database.GetDbConnection();
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        // Helper: ALTER TABLE ADD COLUMN is a no-op in SQLite if column already exists (we catch the error)
+        var migrations = new[]
+        {
+            "ALTER TABLE Players ADD COLUMN TotalExperience INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE Players ADD COLUMN CurrentLevel INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE Players ADD COLUMN Gold INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE MatchHistory ADD COLUMN XpGained INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE MatchHistory ADD COLUMN GoldEarned INTEGER NOT NULL DEFAULT 0",
+        };
+        foreach (var sql in migrations)
+        {
+            try
+            {
+                cmd.CommandText = sql;
+                cmd.ExecuteNonQuery();
+                Log.Information("DB migration applied: {Sql}", sql);
+            }
+            catch (Exception)
+            {
+                // Column already exists — ignore
+            }
+        }
+        conn.Close();
+
+        Log.Information("Database initialized (SQLite: mazewars.db)");
+    }
 
     // =============================================
     // MIDDLEWARE PIPELINE

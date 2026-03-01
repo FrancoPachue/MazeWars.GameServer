@@ -12,4 +12,6 @@ public class Mob
     public string RoomId { get; set; } = string.Empty;
     public DateTime LastStateChange { get; set; } = DateTime.UtcNow;
     public bool IsDirty { get; set; } = true;
+    public int BossPhase { get; set; }
+    public DateTime LastSummonTime { get; set; } = DateTime.MinValue;
 }

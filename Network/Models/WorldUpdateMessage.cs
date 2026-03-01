@@ -30,4 +30,7 @@ public class WorldUpdateMessage
 
     [Key(6)]
     public List<MobUpdate> MobUpdates { get; set; } = new();
+
+    [Key(7)]
+    public List<ContainerUpdate> ContainerUpdates { get; set; } = new();
 }

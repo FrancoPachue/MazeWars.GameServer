@@ -9,4 +9,5 @@ public class ItemUseResult
     public List<StatusEffect> AppliedEffects { get; set; } = new();
     public int HealthRestored { get; set; }
     public int ManaRestored { get; set; }
+    public string? UnlockedConnectionId { get; set; }
 }

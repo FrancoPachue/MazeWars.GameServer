@@ -58,6 +58,11 @@ public class EnhancedMob : Mob
     public List<Vector2> RecentPositions { get; set; } = new();
     public DateTime LastPositionUpdate { get; set; } = DateTime.UtcNow;
 
+    // Telegraph / Casting
+    public string? PendingAbility { get; set; }
+    public DateTime TelegraphStart { get; set; }
+    public float TelegraphDuration { get; set; }
+
     // Debug and Analytics
     public int StateChanges { get; set; }
     public int AttacksPerformed { get; set; }

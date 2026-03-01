@@ -35,6 +35,12 @@ public class InputProcessor
     public event Action<RealTimePlayer, ChatMessage>? OnChat;
 
     /// <summary>
+    /// Event triggered when a ping marker input is received.
+    /// Handler signature: (player, pingData) => void
+    /// </summary>
+    public event Action<RealTimePlayer, PingMarkerMessage>? OnPingMarker;
+
+    /// <summary>
     /// Event triggered when a use item input is received.
     /// Handler signature: (player, useItemData) => void
     /// </summary>
@@ -53,6 +59,11 @@ public class InputProcessor
     public event Action<RealTimePlayer, TradeRequestMessage>? OnTradeRequest;
 
     /// <summary>
+    /// Event triggered when a container grab input is received.
+    /// </summary>
+    public event Action<RealTimePlayer, ContainerGrabMessage>? OnContainerGrab;
+
+    /// <summary>
     /// Delegate for finding players by ID.
     /// Set by GameEngine to allow input processor to resolve player references.
     /// </summary>
@@ -64,132 +75,6 @@ public class InputProcessor
         _inputBuffer = new InputBuffer(logger);
 
         _logger.LogInformation("InputProcessor initialized with InputBuffer for UDP packet reordering");
-    }
-
-    // =============================================
-    // MESSAGE DATA DESERIALIZATION HELPER
-    // =============================================
-
-    /// <summary>
-    /// Converts message.Data (deserialized as object array by MessagePack) to specific type T.
-    /// </summary>
-    private T? ConvertMessageData<T>(object data) where T : class
-    {
-        try
-        {
-            if (data == null)
-            {
-                _logger.LogWarning("Null data for type {Type}", typeof(T).Name);
-                return null;
-            }
-
-            if (data is not object[] array)
-            {
-                _logger.LogWarning("Expected object[] but got {DataType} for type {Type}",
-                    data.GetType().Name, typeof(T).Name);
-                return null;
-            }
-
-            return MapArrayToType<T>(array);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to convert message data to type {Type}", typeof(T).Name);
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Maps object array to strongly-typed objects based on [Key] attribute indices.
-    /// </summary>
-    private T? MapArrayToType<T>(object[] array) where T : class
-    {
-        var type = typeof(T);
-
-        if (type == typeof(PlayerInputMessage) && array.Length >= 9)
-        {
-            return new PlayerInputMessage
-            {
-                SequenceNumber = Convert.ToUInt32(array[0]),
-                AckSequenceNumber = Convert.ToUInt32(array[1]),
-                ClientTimestamp = Convert.ToSingle(array[2]),
-                MoveInput = ParseVector2(array[3]),
-                IsSprinting = Convert.ToBoolean(array[4]),
-                AimDirection = Convert.ToSingle(array[5]),
-                IsAttacking = Convert.ToBoolean(array[6]),
-                AbilityType = array[7]?.ToString() ?? string.Empty,
-                AbilityTarget = ParseVector2(array[8])
-            } as T;
-        }
-
-        if (type == typeof(LootGrabMessage) && array.Length >= 1)
-        {
-            return new LootGrabMessage
-            {
-                LootId = array[0]?.ToString() ?? string.Empty
-            } as T;
-        }
-
-        if (type == typeof(ChatMessage) && array.Length >= 2)
-        {
-            return new ChatMessage
-            {
-                Message = array[0]?.ToString() ?? string.Empty,
-                ChatType = array[1]?.ToString() ?? "team"
-            } as T;
-        }
-
-        if (type == typeof(UseItemMessage) && array.Length >= 3)
-        {
-            return new UseItemMessage
-            {
-                ItemId = array[0]?.ToString() ?? string.Empty,
-                ItemType = array[1]?.ToString() ?? string.Empty,
-                TargetPosition = ParseVector2(array[2])
-            } as T;
-        }
-
-        if (type == typeof(ExtractionMessage) && array.Length >= 2)
-        {
-            return new ExtractionMessage
-            {
-                Action = array[0]?.ToString() ?? string.Empty,
-                ExtractionId = array[1]?.ToString() ?? string.Empty
-            } as T;
-        }
-
-        if (type == typeof(TradeRequestMessage) && array.Length >= 3)
-        {
-            return new TradeRequestMessage
-            {
-                TargetPlayerId = array[0]?.ToString() ?? string.Empty,
-                OfferedItemIds = array[1] is object[] offered
-                    ? offered.Select(o => o?.ToString() ?? string.Empty).ToList()
-                    : new List<string>(),
-                RequestedItemIds = array[2] is object[] requested
-                    ? requested.Select(r => r?.ToString() ?? string.Empty).ToList()
-                    : new List<string>()
-            } as T;
-        }
-
-        _logger.LogWarning("No mapping defined for type {Type}", type.Name);
-        return null;
-    }
-
-    /// <summary>
-    /// Helper to parse Vector2 from object array [x, y]
-    /// </summary>
-    private Vector2 ParseVector2(object data)
-    {
-        if (data is object[] arr && arr.Length >= 2)
-        {
-            return new Vector2
-            {
-                X = Convert.ToSingle(arr[0]),
-                Y = Convert.ToSingle(arr[1])
-            };
-        }
-        return new Vector2();
     }
 
     // =============================================
@@ -288,6 +173,10 @@ public class InputProcessor
                 HandleChat(player, input);
                 break;
 
+            case "ping_marker":
+                HandlePingMarker(player, input);
+                break;
+
             case "use_item":
                 HandleUseItem(player, input);
                 break;
@@ -298,6 +187,10 @@ public class InputProcessor
 
             case "trade_request":
                 HandleTradeRequest(player, input);
+                break;
+
+            case "loot_container_grab":
+                HandleContainerGrab(player, input);
                 break;
 
             default:
@@ -317,7 +210,7 @@ public class InputProcessor
     private void HandlePlayerInput(RealTimePlayer player, NetworkMessage input)
     {
         // Convert message.Data to PlayerInputMessage
-        var playerInput = ConvertMessageData<PlayerInputMessage>(input.Data);
+        var playerInput = MessageDataConverter.Convert<PlayerInputMessage>(input.Data);
         if (playerInput == null)
         {
             _logger.LogWarning("Invalid player input data from {PlayerId}", player.PlayerId);
@@ -340,7 +233,7 @@ public class InputProcessor
     private void HandleLootGrab(RealTimePlayer player, NetworkMessage input)
     {
         // Convert message.Data to LootGrabMessage
-        var lootGrab = ConvertMessageData<LootGrabMessage>(input.Data);
+        var lootGrab = MessageDataConverter.Convert<LootGrabMessage>(input.Data);
         if (lootGrab == null)
         {
             _logger.LogWarning("Invalid loot grab data from {PlayerId}", player.PlayerId);
@@ -356,7 +249,7 @@ public class InputProcessor
     private void HandleChat(RealTimePlayer player, NetworkMessage input)
     {
         // Convert message.Data to ChatMessage
-        var chat = ConvertMessageData<ChatMessage>(input.Data);
+        var chat = MessageDataConverter.Convert<ChatMessage>(input.Data);
         if (chat == null)
         {
             _logger.LogWarning("Invalid chat data from {PlayerId}", player.PlayerId);
@@ -367,12 +260,27 @@ public class InputProcessor
     }
 
     /// <summary>
+    /// Handle ping marker input.
+    /// </summary>
+    private void HandlePingMarker(RealTimePlayer player, NetworkMessage input)
+    {
+        var ping = MessageDataConverter.Convert<PingMarkerMessage>(input.Data);
+        if (ping == null)
+        {
+            _logger.LogWarning("Invalid ping marker data from {PlayerId}", player.PlayerId);
+            return;
+        }
+
+        OnPingMarker?.Invoke(player, ping);
+    }
+
+    /// <summary>
     /// Handle use item input.
     /// </summary>
     private void HandleUseItem(RealTimePlayer player, NetworkMessage input)
     {
         // Convert message.Data to UseItemMessage
-        var useItem = ConvertMessageData<UseItemMessage>(input.Data);
+        var useItem = MessageDataConverter.Convert<UseItemMessage>(input.Data);
         if (useItem == null)
         {
             _logger.LogWarning("Invalid use item data from {PlayerId}", player.PlayerId);
@@ -388,7 +296,7 @@ public class InputProcessor
     private void HandleExtraction(RealTimePlayer player, NetworkMessage input)
     {
         // Convert message.Data to ExtractionMessage
-        var extraction = ConvertMessageData<ExtractionMessage>(input.Data);
+        var extraction = MessageDataConverter.Convert<ExtractionMessage>(input.Data);
         if (extraction == null)
         {
             _logger.LogWarning("Invalid extraction data from {PlayerId}", player.PlayerId);
@@ -404,7 +312,7 @@ public class InputProcessor
     private void HandleTradeRequest(RealTimePlayer player, NetworkMessage input)
     {
         // Convert message.Data to TradeRequestMessage
-        var tradeRequest = ConvertMessageData<TradeRequestMessage>(input.Data);
+        var tradeRequest = MessageDataConverter.Convert<TradeRequestMessage>(input.Data);
         if (tradeRequest == null)
         {
             _logger.LogWarning("Invalid trade request data from {PlayerId}", player.PlayerId);
@@ -412,6 +320,21 @@ public class InputProcessor
         }
 
         OnTradeRequest?.Invoke(player, tradeRequest);
+    }
+
+    /// <summary>
+    /// Handle container grab input.
+    /// </summary>
+    private void HandleContainerGrab(RealTimePlayer player, NetworkMessage input)
+    {
+        var containerGrab = MessageDataConverter.Convert<ContainerGrabMessage>(input.Data);
+        if (containerGrab == null)
+        {
+            _logger.LogWarning("Invalid container grab data from {PlayerId}", player.PlayerId);
+            return;
+        }
+
+        OnContainerGrab?.Invoke(player, containerGrab);
     }
 
     // =============================================
@@ -436,6 +359,14 @@ public class InputProcessor
         _logger.LogDebug("Cleared input buffer for player {PlayerId}", playerId);
     }
 
+    /// <summary>
+    /// Get input buffer stats for a specific player (packet loss, etc.)
+    /// </summary>
+    public InputStats? GetInputStats(string playerId)
+    {
+        return _inputBuffer.GetStats(playerId);
+    }
+
     // =============================================
     // STATISTICS AND DIAGNOSTICS
     // =============================================
@@ -443,7 +374,7 @@ public class InputProcessor
     /// <summary>
     /// Get input processing statistics.
     /// </summary>
-    public Dictionary<string, object> GetInputStats()
+    public Dictionary<string, object> GetInputProcessingStats()
     {
         return new Dictionary<string, object>
         {

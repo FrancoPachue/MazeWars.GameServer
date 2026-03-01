@@ -55,6 +55,7 @@ public class NetworkObjectPools
                 obj.TargetId = string.Empty;
                 obj.Value = 0;
                 obj.Position = default;
+                obj.RoomId = string.Empty;
             },
             maxPoolSize: 300
         );
@@ -68,6 +69,7 @@ public class NetworkObjectPools
                 obj.LootId = string.Empty;
                 obj.ItemName = string.Empty;
                 obj.Position = default;
+                obj.RoomId = string.Empty;
             },
             maxPoolSize: 200
         );
@@ -81,6 +83,9 @@ public class NetworkObjectPools
                 obj.Position = default;
                 obj.State = string.Empty;
                 obj.Health = 0;
+                obj.RoomId = string.Empty;
+                obj.MobType = string.Empty;
+                obj.Phase = 0;
             },
             maxPoolSize: 400
         );

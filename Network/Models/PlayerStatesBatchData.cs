@@ -23,4 +23,7 @@ public class PlayerStatesBatchData
     /// </summary>
     [Key(3)]
     public Dictionary<string, uint> AcknowledgedInputs { get; set; } = new();
+
+    [Key(4)]
+    public uint StateChecksum { get; set; }
 }

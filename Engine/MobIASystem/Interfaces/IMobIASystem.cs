@@ -225,10 +225,20 @@ public interface IMobAISystem : IDisposable
     /// <summary>
     /// Event fired when a mob attacks a player
     /// </summary>
-    event Action<Mob, RealTimePlayer, int>? OnMobAttack; // mob, target, damage
+    event Action<Mob, RealTimePlayer, int, bool>? OnMobAttack; // mob, target, damage, isCrit
 
     /// <summary>
     /// Event fired when a boss is spawned
     /// </summary>
     event Action<string, Mob>? OnBossSpawned; // worldId, boss
+
+    /// <summary>
+    /// Event fired when a mob kills a player
+    /// </summary>
+    event Action<RealTimePlayer, Mob>? OnPlayerKilledByMob; // deadPlayer, killerMob
+
+    /// <summary>
+    /// Event fired when a mob uses an ability (for CombatEvent routing)
+    /// </summary>
+    event Action<string, CombatEvent>? OnMobAbilityUsed; // worldId, combatEvent
 }
