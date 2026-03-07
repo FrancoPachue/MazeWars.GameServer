@@ -77,7 +77,7 @@ public static class EquipmentRegistry
             ItemId = "iron_sword", DisplayName = "Iron Sword",
             Slot = EquipmentSlot.Weapon, Tier = 1, Weight = 3.0f,
             BonusHealth = 10,
-            GrantedAbilities = ["sword_slash", "sword_heavy_strike", "sword_whirlwind"]
+            GrantedAbilities = ["sword_slash", "sword_cone_stun"]
         });
         Register(new EquipmentDefinition
         {
@@ -211,14 +211,15 @@ public static class EquipmentRegistry
             GrantedAbilities = ["cloth_boots_blink"]
         });
 
-        // ── Offhand (passive only) ──────────────────────────────
+        // ── Offhand ──────────────────────────────────────────────
 
-        // Shield: pure defense
+        // Shield: defense + charge ability
         Register(new EquipmentDefinition
         {
             ItemId = "wooden_shield", DisplayName = "Wooden Shield",
             Slot = EquipmentSlot.Offhand, Tier = 1, Weight = 2.0f,
-            BonusHealth = 20, DamageReduction = 0.06f
+            BonusHealth = 20, DamageReduction = 0.06f,
+            GrantedAbilities = ["shield_charge"]
         });
         // Tome: caster offhand
         Register(new EquipmentDefinition

@@ -20,4 +20,13 @@ public class Projectile
     public bool IsActive { get; set; } = true;
     public string WorldId { get; set; } = string.Empty;
     public bool IsMobProjectile { get; set; }
+
+    // Crit info (resolved at spawn from owner stats, rolled on hit)
+    public float OwnerCritChance { get; set; }
+
+    // Status effect applied on hit (e.g., slow from frostbolt, poison from projectile abilities)
+    public string? AppliesEffect { get; set; }
+    public int EffectValue { get; set; }
+    public int EffectDurationMs { get; set; }
+    public string EffectSourcePlayerId { get; set; } = string.Empty;
 }

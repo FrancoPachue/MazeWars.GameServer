@@ -360,6 +360,15 @@ public class InputProcessor
     }
 
     /// <summary>
+    /// Reset input buffer for a reconnecting player (resets sequence tracking without removing).
+    /// </summary>
+    public void ResetPlayerInputBuffer(string playerId)
+    {
+        _inputBuffer.ResetPlayer(playerId);
+        _logger.LogDebug("Reset input buffer for reconnecting player {PlayerId}", playerId);
+    }
+
+    /// <summary>
     /// Get input buffer stats for a specific player (packet loss, etc.)
     /// </summary>
     public InputStats? GetInputStats(string playerId)

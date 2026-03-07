@@ -22,6 +22,19 @@ public class WorldStateEssentialData
 
     [Key(4)]
     public List<ScoreboardEntryData> Scoreboard { get; set; } = new();
+
+    [Key(5)]
+    public CorruptionStateData? CorruptionState { get; set; }
+}
+
+[MessagePackObject(keyAsPropertyName: false)]
+public class CorruptionStateData
+{
+    [Key(0)] public int CurrentWave { get; set; }
+    [Key(1)] public List<string> CorruptedRoomIds { get; set; } = new();
+    [Key(2)] public List<string> WarningRoomIds { get; set; } = new();
+    [Key(3)] public double SecondsUntilNextWave { get; set; }
+    [Key(4)] public int CurrentDamagePerSecond { get; set; }
 }
 
 [MessagePackObject(keyAsPropertyName: false)]

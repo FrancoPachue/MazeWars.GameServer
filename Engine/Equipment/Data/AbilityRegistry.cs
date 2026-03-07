@@ -23,20 +23,15 @@ public static class AbilityRegistry
         {
             AbilityId = "sword_slash", DisplayName = "Slash",
             Type = AbilityType.MeleeDamage, SlotIndex = 0,
-            BaseDamage = 20, ManaCost = 0, CooldownMs = 0, Range = 1.5f,
-            AttackSpeedMs = 700
+            BaseDamage = 20, ManaCost = 15, CooldownMs = 4000, Range = 1.5f,
+            AttackSpeedMs = 700, HitCount = 3
         });
         Register(new AbilityDefinition
         {
-            AbilityId = "sword_heavy_strike", DisplayName = "Heavy Strike",
+            AbilityId = "sword_cone_stun", DisplayName = "Stunning Blow",
             Type = AbilityType.MeleeDamage, SlotIndex = 1,
-            BaseDamage = 40, ManaCost = 15, CooldownMs = 3000, Range = 1.5f
-        });
-        Register(new AbilityDefinition
-        {
-            AbilityId = "sword_whirlwind", DisplayName = "Whirlwind",
-            Type = AbilityType.AreaDamage, SlotIndex = 2,
-            BaseDamage = 30, ManaCost = 30, CooldownMs = 8000, Range = 0, AreaRadius = 2.0f
+            BaseDamage = 30, ManaCost = 20, CooldownMs = 8000, Range = 1.5f,
+            AppliesEffect = "stun", EffectDurationMs = 1500
         });
 
         // ── Fire Staff (Weapon) ─────────────────────────────────
@@ -218,6 +213,16 @@ public static class AbilityRegistry
             AbilityId = "cloth_boots_blink", DisplayName = "Blink",
             Type = AbilityType.Dash, SlotIndex = 0,
             ManaCost = 20, CooldownMs = 15000, DashDistance = 8f, DashSpeed = 100f
+        });
+
+        // ── Offhand Abilities ─────────────────────────────────
+        Register(new AbilityDefinition
+        {
+            AbilityId = "shield_charge", DisplayName = "Shield Charge",
+            Type = AbilityType.Dash, SlotIndex = 2,
+            ManaCost = 25, CooldownMs = 15000,
+            DashDistance = 4f, DashSpeed = 15f,
+            BaseHealing = 30, DurationMs = 3000  // Also grants a shield after dashing
         });
     }
 }

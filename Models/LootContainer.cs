@@ -7,6 +7,7 @@ public class LootContainer
     public Vector2 Position { get; set; }
     public string RoomId { get; set; } = string.Empty;
     public List<LootItem> Contents { get; set; } = new();
+    public readonly object ContentsLock = new();
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public float DespawnAfterSeconds { get; set; } // 0 = permanent (chests), >0 = despawn timer (corpses)
     public string SourceId { get; set; } = string.Empty; // MobId or PlayerId that died

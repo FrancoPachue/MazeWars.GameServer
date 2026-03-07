@@ -1,4 +1,6 @@
-﻿using System.Net;
+﻿using System.Collections.Concurrent;
+using System.Net;
+using System.Threading;
 using MazeWars.GameServer.Engine.Equipment.Models;
 
 namespace MazeWars.GameServer.Models;
@@ -8,6 +10,7 @@ public class RealTimePlayer
     // Identity
     public string PlayerId { get; set; } = string.Empty;
     public string PlayerName { get; set; } = string.Empty;
+    public string CharacterName { get; set; } = string.Empty;
     public string TeamId { get; set; } = string.Empty;
     public string PlayerClass { get; set; } = "scout";
 
@@ -27,7 +30,15 @@ public class RealTimePlayer
     public bool IsPathing { get; set; }
 
     // Combat & Stats
-    public bool IsAlive { get; set; } = true;
+    private int _isAliveInt = 1;
+    public bool IsAlive
+    {
+        get => Volatile.Read(ref _isAliveInt) == 1;
+        set => Interlocked.Exchange(ref _isAliveInt, value ? 1 : 0);
+    }
+
+    /// <summary>Atomically transitions from alive to dead. Returns true if THIS call killed the player.</summary>
+    public bool TryKill() => Interlocked.CompareExchange(ref _isAliveInt, 0, 1) == 1;
     public int Health { get; set; } = 100;
     public int MaxHealth { get; set; } = 100;
     public int Mana { get; set; } = 100;
@@ -39,6 +50,10 @@ public class RealTimePlayer
     public DateTime DeathTime { get; set; }
     public DateTime LastDashTime { get; set; }
 
+    // CC Diminishing Returns: tracks recent CC applications to reduce subsequent durations
+    public DateTime LastCcTime { get; set; } = DateTime.MinValue;
+    public int RecentCcCount { get; set; } = 0;
+
     // Progression
     public int Level { get; set; } = 1;
     public int ExperiencePoints { get; set; } = 0;
@@ -46,9 +61,10 @@ public class RealTimePlayer
     // World State
     public string CurrentRoomId { get; set; } = "room_1_1";
     public List<LootItem> Inventory { get; set; } = new();
+    public List<LootItem> InsuredRecovery { get; set; } = new();
 
     // Equipment (6 slots)
-    public Dictionary<EquipmentSlot, LootItem> Equipment { get; set; } = new();
+    public ConcurrentDictionary<EquipmentSlot, LootItem> Equipment { get; set; } = new();
     public int EquipmentBonusHealth { get; set; }
     public int EquipmentBonusMana { get; set; }
     public float EquipmentDamageReduction { get; set; }
@@ -67,6 +83,7 @@ public class RealTimePlayer
     // Regen accumulators (fractional HP/mana accumulated until >= 1)
     public float HealthRegenAccumulator { get; set; }
     public float ManaRegenAccumulator { get; set; }
+    public float SprintManaAccumulator { get; set; }
 
     // Per-run level bonuses (accumulated)
     public float LevelBonusDamagePercent { get; set; }
@@ -80,8 +97,14 @@ public class RealTimePlayer
     /// <summary>ID of dead player whose soul is being carried (null if not carrying)</summary>
     public string? CarryingSoulOfPlayerId { get; set; }
 
-    // Thread safety for inventory operations
+    // Thread safety for inventory and status effects operations
     public readonly object InventoryLock = new();
+    public readonly object StatusEffectsLock = new();
+
+    // Account-level baseline (loaded from DB on connect, used for match summary)
+    public long AccountTotalXP { get; set; }
+    public long AccountGold { get; set; }
+    public int AccountLevel { get; set; } = 1;
 
     // Match statistics
     public int Kills { get; set; }
@@ -92,7 +115,7 @@ public class RealTimePlayer
     public int ContainersLooted { get; set; }
 
     // Abilities & Effects
-    public Dictionary<string, DateTime> AbilityCooldowns { get; set; } = new();
+    public ConcurrentDictionary<string, DateTime> AbilityCooldowns { get; set; } = new();
     public bool IsCasting { get; set; }
     public DateTime CastingUntil { get; set; }
     public string? ChannelingAbility { get; set; }
@@ -169,6 +192,9 @@ public class RealTimePlayer
     private Vector2? _lastSentMoveTarget;
     private string _lastSentWeaponId = string.Empty;
     private string _lastSentChestId = string.Empty;
+    private string _lastSentHeadId = string.Empty;
+    private string _lastSentBootsId = string.Empty;
+    private string _lastSentOffhandId = string.Empty;
     private int _lastSentEffectCount = -1;
 
     // Thresholds for determining significant changes
@@ -221,7 +247,11 @@ public class RealTimePlayer
         // Equipment visual changed
         var weaponId = Equipment.TryGetValue(EquipmentSlot.Weapon, out var w) && w.Properties.TryGetValue("equipment_id", out var wId) ? wId?.ToString() ?? string.Empty : string.Empty;
         var chestId = Equipment.TryGetValue(EquipmentSlot.Chest, out var c) && c.Properties.TryGetValue("equipment_id", out var cId) ? cId?.ToString() ?? string.Empty : string.Empty;
-        if (weaponId != _lastSentWeaponId || chestId != _lastSentChestId)
+        var headId = Equipment.TryGetValue(EquipmentSlot.Head, out var h) && h.Properties.TryGetValue("equipment_id", out var hId) ? hId?.ToString() ?? string.Empty : string.Empty;
+        var bootsId = Equipment.TryGetValue(EquipmentSlot.Boots, out var b) && b.Properties.TryGetValue("equipment_id", out var bId) ? bId?.ToString() ?? string.Empty : string.Empty;
+        var offhandId = Equipment.TryGetValue(EquipmentSlot.Offhand, out var o) && o.Properties.TryGetValue("equipment_id", out var oId) ? oId?.ToString() ?? string.Empty : string.Empty;
+        if (weaponId != _lastSentWeaponId || chestId != _lastSentChestId ||
+            headId != _lastSentHeadId || bootsId != _lastSentBootsId || offhandId != _lastSentOffhandId)
         {
             return true;
         }
@@ -252,6 +282,9 @@ public class RealTimePlayer
         _lastSentMoveTarget = MoveTarget;
         _lastSentWeaponId = Equipment.TryGetValue(EquipmentSlot.Weapon, out var w) && w.Properties.TryGetValue("equipment_id", out var wId) ? wId?.ToString() ?? string.Empty : string.Empty;
         _lastSentChestId = Equipment.TryGetValue(EquipmentSlot.Chest, out var c) && c.Properties.TryGetValue("equipment_id", out var cId) ? cId?.ToString() ?? string.Empty : string.Empty;
+        _lastSentHeadId = Equipment.TryGetValue(EquipmentSlot.Head, out var h) && h.Properties.TryGetValue("equipment_id", out var hId) ? hId?.ToString() ?? string.Empty : string.Empty;
+        _lastSentBootsId = Equipment.TryGetValue(EquipmentSlot.Boots, out var b) && b.Properties.TryGetValue("equipment_id", out var bId) ? bId?.ToString() ?? string.Empty : string.Empty;
+        _lastSentOffhandId = Equipment.TryGetValue(EquipmentSlot.Offhand, out var o) && o.Properties.TryGetValue("equipment_id", out var oId) ? oId?.ToString() ?? string.Empty : string.Empty;
         _lastSentEffectCount = StatusEffects.Count;
     }
 
@@ -272,6 +305,9 @@ public class RealTimePlayer
         _lastSentMoveTarget = new Vector2(float.MaxValue, float.MaxValue);
         _lastSentWeaponId = "\0";
         _lastSentChestId = "\0";
+        _lastSentHeadId = "\0";
+        _lastSentBootsId = "\0";
+        _lastSentOffhandId = "\0";
         _lastSentEffectCount = -1;
     }
 }

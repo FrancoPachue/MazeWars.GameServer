@@ -25,4 +25,7 @@ public class GameStartedData
 
     [Key(5)]
     public List<RoomInfoData> Rooms { get; set; } = new();
+
+    [Key(6)]
+    public string DifficultyTier { get; set; } = "normal";
 }

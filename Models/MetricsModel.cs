@@ -31,8 +31,8 @@ public class PerformanceMetrics
 public class NetworkMetrics
 {
     public int ConnectedClients { get; set; }
-    public int PacketsSent { get; set; }
-    public int PacketsReceived { get; set; }
+    public long PacketsSent { get; set; }
+    public long PacketsReceived { get; set; }
     public bool IsRunning { get; set; }
 }
 

@@ -25,4 +25,13 @@ public class PlayerStatsData
 
     [Key(5)]
     public int ExperiencePoints { get; set; }
+
+    [Key(6)]
+    public long Gold { get; set; }
+
+    [Key(7)]
+    public int AccountLevel { get; set; }
+
+    [Key(8)]
+    public long AccountTotalXP { get; set; }
 }

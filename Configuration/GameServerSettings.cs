@@ -39,24 +39,35 @@ public class GameServerSettings
         ["solos"] = new GameModeConfig
         {
             MaxTeamSize = 1,
-            GridSizeX = 4,
-            GridSizeY = 4,
+            GridSizeX = 7,
+            GridSizeY = 7,
             MobsPerRoom = 2,
             MobHealthMultiplier = 0.7f,
             MobDamageMultiplier = 0.7f,
             MaxPlayersPerLobby = 8,
-            InitialLootCount = 15
+            InitialLootCount = 40
         },
         ["trios"] = new GameModeConfig
         {
             MaxTeamSize = 3,
-            GridSizeX = 5,
-            GridSizeY = 5,
+            GridSizeX = 9,
+            GridSizeY = 9,
             MobsPerRoom = 3,
             MobHealthMultiplier = 1.0f,
             MobDamageMultiplier = 1.0f,
-            MaxPlayersPerLobby = 12,
-            InitialLootCount = 25
+            MaxPlayersPerLobby = 18,
+            InitialLootCount = 60
+        },
+        ["arena"] = new GameModeConfig
+        {
+            MaxTeamSize = 1,
+            GridSizeX = 1,
+            GridSizeY = 1,
+            MobsPerRoom = 0,
+            MobHealthMultiplier = 0f,
+            MobDamageMultiplier = 0f,
+            MaxPlayersPerLobby = 4,
+            InitialLootCount = 0
         }
     };
 }
@@ -64,8 +75,8 @@ public class GameServerSettings
 public class GameModeConfig
 {
     public int MaxTeamSize { get; set; } = 3;
-    public int GridSizeX { get; set; } = 5;
-    public int GridSizeY { get; set; } = 5;
+    public int GridSizeX { get; set; } = 9;
+    public int GridSizeY { get; set; } = 9;
     public int MobsPerRoom { get; set; } = 3;
     public float MobHealthMultiplier { get; set; } = 1.0f;
     public float MobDamageMultiplier { get; set; } = 1.0f;

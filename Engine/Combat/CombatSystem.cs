@@ -5,6 +5,7 @@ using MazeWars.GameServer.Engine.Equipment.Data;
 using MazeWars.GameServer.Engine.Equipment.Interface;
 using MazeWars.GameServer.Engine.Equipment.Models;
 using MazeWars.GameServer.Engine.MobIASystem.Models;
+using MazeWars.GameServer.Engine.Movement.Interface;
 using MazeWars.GameServer.Models;
 using MazeWars.GameServer.Network.Models;
 using MazeWars.GameServer.Utils;
@@ -18,7 +19,7 @@ public class CombatSystem : ICombatSystem
     private readonly ILogger<CombatSystem> _logger;
     private readonly GameServerSettings _settings;
     private readonly IEquipmentSystem _equipmentSystem;
-    private readonly Random _random;
+    private readonly IMovementSystem _movementSystem;
 
     public ProjectileSystem ProjectileSystem { get; }
 
@@ -27,18 +28,25 @@ public class CombatSystem : ICombatSystem
     public Func<string, float>? RttLookup { get; set; }
 
     public CombatSystem(ILogger<CombatSystem> logger, IOptions<GameServerSettings> settings,
-        IEquipmentSystem equipmentSystem, ProjectileSystem projectileSystem)
+        IEquipmentSystem equipmentSystem, ProjectileSystem projectileSystem, IMovementSystem movementSystem)
     {
         _logger = logger;
         _settings = settings.Value;
         _equipmentSystem = equipmentSystem;
-        _random = new Random();
         ProjectileSystem = projectileSystem;
+        _movementSystem = movementSystem;
     }
 
     public bool CanAttack(RealTimePlayer player)
     {
         if (!player.IsAlive || player.IsCasting) return false;
+
+        // Stunned players cannot attack
+        lock (player.StatusEffectsLock)
+        {
+            if (player.StatusEffects.Any(e => e.EffectType == "stun" && e.ExpiresAt > DateTime.UtcNow))
+                return false;
+        }
 
         // Resolve per-weapon attack speed
         var attackCooldownMs = _settings.GameBalance.AttackCooldownMs;
@@ -89,6 +97,13 @@ public class CombatSystem : ICombatSystem
     {
         if (!player.IsAlive || player.IsCasting) return false;
 
+        // Stunned players cannot use abilities
+        lock (player.StatusEffectsLock)
+        {
+            if (player.StatusEffects.Any(e => e.EffectType == "stun" && e.ExpiresAt > DateTime.UtcNow))
+                return false;
+        }
+
         // Resolve ability through equipment system
         var resolved = _equipmentSystem.ResolveAbilityWithModifiers(player, abilityType);
         if (resolved == null) return false;
@@ -98,7 +113,8 @@ public class CombatSystem : ICombatSystem
         // Check cooldown (with CDR from equipment)
         if (player.AbilityCooldowns.TryGetValue(abilityType, out var lastUsed))
         {
-            var cooldownMs = (int)(ability.CooldownMs * (modifier?.CooldownMultiplier ?? 1f) * (1f - player.CooldownReduction));
+            var effectiveCDR = Math.Min(player.CooldownReduction, 0.5f);
+            var cooldownMs = (int)(ability.CooldownMs * (modifier?.CooldownMultiplier ?? 1f) * (1f - effectiveCDR));
             if (DateTime.UtcNow - lastUsed < TimeSpan.FromMilliseconds(cooldownMs))
                 return false;
         }
@@ -111,6 +127,16 @@ public class CombatSystem : ICombatSystem
     public async Task<CombatResult> ProcessAttack(RealTimePlayer attacker, List<RealTimePlayer> potentialTargets, GameWorld world)
     {
         var result = new CombatResult { Success = false, Events = new List<CombatEvent>() };
+
+        // Break stealth on combat action
+        lock (attacker.StatusEffectsLock)
+        {
+            var stealthEffect = attacker.StatusEffects.FirstOrDefault(e => e.EffectType == "stealth");
+            if (stealthEffect != null)
+            {
+                attacker.StatusEffects.Remove(stealthEffect);
+            }
+        }
 
         if (!CanAttack(attacker))
         {
@@ -131,12 +157,18 @@ public class CombatSystem : ICombatSystem
                 (float)Math.Cos(attacker.Direction),
                 (float)Math.Sin(attacker.Direction)
             );
-            var (damage, _) = CalculateBasicAttackDamageVsMob(attacker); // pre-calculated, crit handled on hit
+            // Pass base damage WITHOUT crit — crit is rolled on hit in ProjectileSystem.HitPlayer
+            var abilities = _equipmentSystem.GetAvailableAbilities(attacker);
+            var slot0 = abilities.FirstOrDefault(a => a.SlotIndex == 0 &&
+                (a.Type == AbilityType.MeleeDamage || a.Type == AbilityType.ProjectileDamage));
+            var rawBaseDamage = slot0?.BaseDamage ?? 15f;
+            var totalBonusDmg = attacker.BonusDamagePercent + attacker.LevelBonusDamagePercent;
+            var projectileDamage = rawBaseDamage * (1f + totalBonusDmg);
 
             ProjectileSystem.SpawnProjectile(
                 attacker, basicAbility.AbilityId,
                 direction, basicAbility.ProjectileSpeed, basicAbility.ProjectileRadius,
-                attackRange, damage, 0, world);
+                attackRange, projectileDamage, 0, world);
 
             attacker.LastAttackTime = DateTime.UtcNow;
             result.Success = true;
@@ -204,7 +236,7 @@ public class CombatSystem : ICombatSystem
 
         foreach (var mob in targets)
         {
-            var (damage, isCrit) = CalculateBasicAttackDamageVsMob(attacker);
+            var (damage, isCrit) = CalculateBasicAttackDamageVsMob(attacker, mob);
             mob.Health = Math.Max(0, mob.Health - damage);
             mob.IsDirty = true;
             if (mob is EnhancedMob em1) em1.RequiresUpdate = true;
@@ -230,9 +262,25 @@ public class CombatSystem : ICombatSystem
 
     public async Task<AbilityResult> ProcessAbility(RealTimePlayer player, string abilityType, Vector2 target, GameWorld world)
     {
+        if (!player.IsAlive)
+            return new AbilityResult { Success = false, ErrorMessage = "Player is dead" };
+
         // Universal mechanic: revive teammate (not equipment-based)
         if (abilityType == "revive")
             return ProcessRevive(player, target, world);
+
+        // Break stealth on combat action (except stealth ability itself)
+        if (abilityType != "stealth")
+        {
+            lock (player.StatusEffectsLock)
+            {
+                var stealthEffect = player.StatusEffects.FirstOrDefault(e => e.EffectType == "stealth");
+                if (stealthEffect != null)
+                {
+                    player.StatusEffects.Remove(stealthEffect);
+                }
+            }
+        }
 
         var result = new AbilityResult { Success = false };
 
@@ -248,8 +296,9 @@ public class CombatSystem : ICombatSystem
 
         // Calculate final parameters
         var finalManaCost = (int)(ability.ManaCost * (modifier?.ManaCostMultiplier ?? 1f));
-        var finalCooldownMs = (int)(ability.CooldownMs * (modifier?.CooldownMultiplier ?? 1f) * (1f - player.CooldownReduction));
-        var finalRange = ability.Range * (modifier?.RangeMultiplier ?? 1f);
+        var effectiveCDR = Math.Min(player.CooldownReduction, 0.5f);
+        var finalCooldownMs = Math.Max(0, (int)(ability.CooldownMs * (modifier?.CooldownMultiplier ?? 1f) * (1f - effectiveCDR)));
+        var finalRange = Math.Min(ability.Range * (modifier?.RangeMultiplier ?? 1f), ability.Range * 1.5f);
         var finalDamage = ability.BaseDamage * (modifier?.DamageMultiplier ?? 1f);
         var finalHealing = ability.BaseHealing * (modifier?.HealingMultiplier ?? 1f);
         var finalDuration = (int)(ability.DurationMs * (modifier?.DurationMultiplier ?? 1f));
@@ -272,30 +321,34 @@ public class CombatSystem : ICombatSystem
             return result;
         }
 
-        // Consume mana
-        player.Mana -= finalManaCost;
-
-        // Handle cast time — stop movement during cast
-        if (finalCastTime > 0)
+        // Server-side range validation for targeted abilities (with lag compensation)
+        var targetedTypes = new[] { AbilityType.MeleeDamage, AbilityType.ProjectileDamage, AbilityType.AreaDamage, AbilityType.Heal, AbilityType.StatusApply, AbilityType.Taunt };
+        if (targetedTypes.Contains(ability.Type) && finalRange > 0)
         {
-            player.IsCasting = true;
-            player.CastingUntil = DateTime.UtcNow.AddMilliseconds(finalCastTime);
+            var distToTarget = GameMathUtils.Distance(player.Position, target);
+            // Lag compensation: allow extra range based on RTT (movement during round-trip)
+            var rtt = RttLookup?.Invoke(player.PlayerId) ?? 0f;
+            var compensationMs = Math.Min(rtt, _settings.NetworkSettings.MaxLagCompensationMs);
+            var movementSpeed = _settings.GameBalance.MovementSpeed;
+            var lagTolerance = (compensationMs / 1000f) * movementSpeed; // Distance target could move during RTT
+            var tolerance = Math.Max(finalRange * 0.1f, lagTolerance); // At least 10%, or lag-based
+            if (distToTarget > finalRange + tolerance)
+            {
+                result.ErrorMessage = "Target out of range";
+                return result;
+            }
         }
 
-        // Stop movement when casting any ability
-        player.Velocity = Vector2.Zero;
-        player.IsMoving = false;
-        player.MoveTarget = null;
-        player.IsPathing = false;
-        player.IsSprinting = false;
+        // Consume mana
+        player.Mana -= finalManaCost;
 
         // Execute by AbilityType
         result = ability.Type switch
         {
-            AbilityType.MeleeDamage => ExecuteMeleeDamage(player, finalDamage, finalRange, target, world),
+            AbilityType.MeleeDamage => ExecuteMeleeDamage(player, finalDamage, finalRange, target, world, ability.HitCount, ability.AbilityId),
             AbilityType.ProjectileDamage => ExecuteProjectileDamage(player, ability, finalDamage, finalRange, target, world),
             AbilityType.AreaDamage => ExecuteAreaDamage(player, finalDamage, finalRange, ability.AreaRadius, target, world, ability.AbilityId),
-            AbilityType.Dash => ExecuteDash(player, ability.DashDistance, ability.DashSpeed, target),
+            AbilityType.Dash => ExecuteDash(player, ability.DashDistance, ability.DashSpeed, target, world),
             AbilityType.Shield => ExecuteShield(player, (int)finalHealing, finalDuration),
             AbilityType.Heal => ExecuteHeal(player, finalHealing, finalRange, target, world, ability.AbilityId),
             AbilityType.Buff => ExecuteBuff(player, ability, modifier, finalDuration, world),
@@ -304,6 +357,54 @@ public class CombatSystem : ICombatSystem
             AbilityType.Taunt => ExecuteTaunt(player, finalRange, world),
             _ => new AbilityResult { Success = false, ErrorMessage = "Unknown ability type" }
         };
+
+        // Only stop movement and apply cast time if the ability succeeded
+        if (result.Success)
+        {
+            if (finalCastTime > 0)
+            {
+                player.IsCasting = true;
+                player.CastingUntil = DateTime.UtcNow.AddMilliseconds(finalCastTime);
+            }
+
+            player.Velocity = Vector2.Zero;
+            player.IsMoving = false;
+            player.MoveTarget = null;
+            player.IsPathing = false;
+            player.IsSprinting = false;
+        }
+
+        // Apply status effects from damage abilities (e.g., stun from sword_cone_stun, poison from dagger_poison_strike, slow from ice_staff_frostbolt)
+        if (result.Success && !string.IsNullOrEmpty(ability.AppliesEffect) && ability.EffectDurationMs > 0
+            && ability.Type is AbilityType.MeleeDamage or AbilityType.AreaDamage or AbilityType.ProjectileDamage)
+        {
+            // For traveling projectile abilities (ProjectileSpeed > 0), status effects are applied on projectile hit (see ProjectileSystem)
+            // For instant-hit projectiles (ProjectileSpeed == 0, legacy path), apply here
+            if (ability.Type != AbilityType.ProjectileDamage || ability.ProjectileSpeed <= 0)
+            {
+                foreach (var evt in result.Events ?? Enumerable.Empty<CombatEvent>())
+                {
+                    if (!evt.EventType.Contains("damage")) continue;
+                    var hitPlayer = world.Players.Values.FirstOrDefault(p => p.PlayerId == evt.TargetId);
+                    if (hitPlayer != null)
+                    {
+                        ApplyStatusEffect(hitPlayer, new StatusEffect
+                        {
+                            EffectType = ability.AppliesEffect,
+                            Value = ability.EffectValue,
+                            ExpiresAt = DateTime.UtcNow.AddMilliseconds(ability.EffectDurationMs),
+                            SourcePlayerId = player.PlayerId
+                        });
+                    }
+                }
+            }
+        }
+
+        // Dash abilities that also grant a shield (e.g., shield_charge)
+        if (result.Success && ability.Type == AbilityType.Dash && ability.BaseHealing > 0 && ability.DurationMs > 0)
+        {
+            ExecuteShield(player, (int)finalHealing, finalDuration);
+        }
 
         // Emit VFX combat events for self-cast abilities that don't emit their own
         if (result.Success)
@@ -340,12 +441,23 @@ public class CombatSystem : ICombatSystem
 
             if (vfxEvent != null)
                 OnCombatEvent?.Invoke(world.WorldId, vfxEvent);
+
+            // Dash+Shield combo: also emit shield VFX
+            if (ability.Type == AbilityType.Dash && ability.BaseHealing > 0 && ability.DurationMs > 0)
+            {
+                OnCombatEvent?.Invoke(world.WorldId, new CombatEvent
+                {
+                    EventType = "shield_applied", SourceId = player.PlayerId,
+                    Value = (int)finalHealing, Position = player.Position,
+                    RoomId = player.CurrentRoomId, AbilityId = ability.AbilityId
+                });
+            }
         }
 
         // Apply class extra effect on success
         if (result.Success && modifier != null && !string.IsNullOrEmpty(modifier.ExtraEffect))
         {
-            if (_random.NextSingle() <= modifier.ExtraEffectChance)
+            if (Random.Shared.NextSingle() <= modifier.ExtraEffectChance)
             {
                 var damageDealt = result.Events.Where(e => e.Value > 0).Sum(e => e.Value);
                 ApplyClassExtraEffect(player, modifier, target, world, damageDealt);
@@ -369,11 +481,68 @@ public class CombatSystem : ICombatSystem
         return result;
     }
 
+    private static readonly HashSet<string> StackableEffects = new(StringComparer.OrdinalIgnoreCase)
+        { "bleed", "poison" };
+    private const int MaxEffectStacks = 5;
+
+    private static readonly HashSet<string> CcEffects = new(StringComparer.OrdinalIgnoreCase)
+        { "stun", "slow" };
+    private const float CcDiminishWindowSeconds = 10f;
+
     public void ApplyStatusEffect(RealTimePlayer player, StatusEffect effect)
     {
-        // Remove existing effects of same type
-        player.StatusEffects.RemoveAll(e => e.EffectType == effect.EffectType);
-        player.StatusEffects.Add(effect);
+        // Diminishing returns for CC effects (stun, slow) in PvP
+        if (CcEffects.Contains(effect.EffectType))
+        {
+            var now = DateTime.UtcNow;
+            var timeSinceLastCc = (now - player.LastCcTime).TotalSeconds;
+            if (timeSinceLastCc > CcDiminishWindowSeconds)
+                player.RecentCcCount = 0; // Reset if window expired
+
+            player.RecentCcCount++;
+            player.LastCcTime = now;
+
+            // Each successive CC within window reduces duration: 100%, 75%, 50%, immune
+            var durationMultiplier = player.RecentCcCount switch
+            {
+                1 => 1.0f,
+                2 => 0.75f,
+                3 => 0.50f,
+                _ => 0f // Immune after 3 CCs in window
+            };
+
+            if (durationMultiplier <= 0f)
+            {
+                _logger.LogDebug("CC immune: {EffectType} on {PlayerName} (diminishing returns)",
+                    effect.EffectType, player.PlayerName);
+                return;
+            }
+
+            if (durationMultiplier < 1f)
+            {
+                var originalDuration = effect.ExpiresAt - now;
+                var reducedDuration = originalDuration * durationMultiplier;
+                effect.ExpiresAt = now + reducedDuration;
+            }
+        }
+
+        lock (player.StatusEffectsLock)
+        {
+            if (StackableEffects.Contains(effect.EffectType))
+            {
+                var existing = player.StatusEffects.Where(e => e.EffectType == effect.EffectType).ToList();
+                if (existing.Count >= MaxEffectStacks)
+                {
+                    var oldest = existing.OrderBy(e => e.AppliedAt).First();
+                    player.StatusEffects.Remove(oldest);
+                }
+            }
+            else
+            {
+                player.StatusEffects.RemoveAll(e => e.EffectType == effect.EffectType);
+            }
+            player.StatusEffects.Add(effect);
+        }
 
         // Apply immediate effects
         switch (effect.EffectType.ToLower())
@@ -393,30 +562,44 @@ public class CombatSystem : ICombatSystem
         {
             if (!player.IsAlive) continue;
 
-            // Check cast completion
             if (player.IsCasting && DateTime.UtcNow >= player.CastingUntil)
             {
                 player.IsCasting = false;
             }
 
             var effectsToRemove = new List<StatusEffect>();
+            bool needsDeathProcessing = false;
 
-            foreach (var effect in player.StatusEffects)
+            lock (player.StatusEffectsLock)
             {
-                if (DateTime.UtcNow >= effect.ExpiresAt)
+                foreach (var effect in player.StatusEffects)
                 {
-                    RemoveStatusEffect(player, effect);
-                    effectsToRemove.Add(effect);
+                    if (DateTime.UtcNow >= effect.ExpiresAt)
+                    {
+                        RemoveStatusEffect(player, effect);
+                        effectsToRemove.Add(effect);
+                    }
+                    else
+                    {
+                        ProcessStatusEffect(player, effect, deltaTime);
+                        // Check if DoT killed the player - defer death processing outside lock
+                        if (player.Health <= 0 && player.IsAlive)
+                        {
+                            needsDeathProcessing = true;
+                        }
+                    }
                 }
-                else
+
+                foreach (var effect in effectsToRemove)
                 {
-                    ProcessStatusEffect(player, effect, deltaTime);
+                    player.StatusEffects.Remove(effect);
                 }
             }
 
-            foreach (var effect in effectsToRemove)
+            // Process death outside the lock to avoid potential deadlocks
+            if (needsDeathProcessing && player.IsAlive)
             {
-                player.StatusEffects.Remove(effect);
+                ProcessPlayerDeath(player, null);
             }
         }
     }
@@ -472,8 +655,7 @@ public class CombatSystem : ICombatSystem
         player.IsMoving = false;
         player.MoveTarget = null;
 
-        // Set cooldown
-        player.AbilityCooldowns["revive"] = DateTime.UtcNow;
+        // Cooldown set on channel COMPLETION, not start (see CompleteChanneling)
 
         _logger.LogInformation("Player {Reviver} started revive channel on {Target} ({Duration}s)",
             player.PlayerName, deadAlly.PlayerName, channelDuration);
@@ -619,10 +801,16 @@ public class CombatSystem : ICombatSystem
                 deadAlly.IsAlive = true;
                 deadAlly.Health = (int)(deadAlly.MaxHealth * ReviveHealthPercent);
                 deadAlly.Shield = 0;
-                deadAlly.StatusEffects.Clear();
+                lock (deadAlly.StatusEffectsLock)
+                {
+                    deadAlly.StatusEffects.Clear();
+                }
                 deadAlly.MovementSpeedModifier = 1f + deadAlly.EquipmentSpeedBonus;
                 deadAlly.DamageReduction = deadAlly.EquipmentDamageReduction;
                 deadAlly.ForceNextUpdate();
+
+                // Set revive cooldown on successful completion (not channel start)
+                player.AbilityCooldowns["revive"] = DateTime.UtcNow;
 
                 _logger.LogInformation("Player {Reviver} revived {Revived} ({Health}/{MaxHealth} HP)",
                     player.PlayerName, deadAlly.PlayerName, deadAlly.Health, deadAlly.MaxHealth);
@@ -657,7 +845,10 @@ public class CombatSystem : ICombatSystem
                 soulAlly.Shield = 0;
                 soulAlly.Position = altarPosition;
                 soulAlly.CurrentRoomId = player.CurrentRoomId;
-                soulAlly.StatusEffects.Clear();
+                lock (soulAlly.StatusEffectsLock)
+                {
+                    soulAlly.StatusEffects.Clear();
+                }
                 soulAlly.MovementSpeedModifier = 1f + soulAlly.EquipmentSpeedBonus;
                 soulAlly.DamageReduction = soulAlly.EquipmentDamageReduction;
                 soulAlly.ForceNextUpdate();
@@ -665,7 +856,7 @@ public class CombatSystem : ICombatSystem
                 // Clear the soul from carrier and restore speed
                 var carriedSoulId = player.CarryingSoulOfPlayerId;
                 player.CarryingSoulOfPlayerId = null;
-                player.MovementSpeedModifier /= 0.8f;
+                player.MovementSpeedModifier = 1f + player.EquipmentSpeedBonus;
 
                 _logger.LogInformation("Player {Reviver} altar-revived {Revived} at {AltarId} ({Health}/{MaxHealth} HP)",
                     player.PlayerName, soulAlly.PlayerName, player.ChannelingTargetId, soulAlly.Health, soulAlly.MaxHealth);
@@ -821,58 +1012,65 @@ public class CombatSystem : ICombatSystem
 
     #region Ability Execution Methods
 
-    private AbilityResult ExecuteMeleeDamage(RealTimePlayer player, float baseDamage, float range, Vector2 target, GameWorld world)
+    private AbilityResult ExecuteMeleeDamage(RealTimePlayer player, float baseDamage, float range, Vector2 target, GameWorld world, int hitCount = 1, string abilityId = "")
     {
         var result = new AbilityResult { Success = false, Events = new List<CombatEvent>() };
         var totalHits = 0;
 
-        // Hit players
+        // Find targets once (they stay in range for all hits of the combo)
         var targets = FindTargetsInRange(player, world.Players.Values, range);
-        foreach (var t in targets)
-        {
-            var (damage, isCrit) = CalculateAbilityDamage(player, baseDamage, t);
-            ApplyDamage(t, damage);
-            t.LastDamageTime = DateTime.UtcNow;
-
-            result.Events.Add(new CombatEvent
-            {
-                EventType = isCrit ? "ability_damage_crit" : "ability_damage",
-                SourceId = player.PlayerId,
-                TargetId = t.PlayerId,
-                Value = damage,
-                Position = t.Position,
-                RoomId = player.CurrentRoomId
-            });
-
-            OnCombatEvent?.Invoke(world.WorldId, result.Events.Last());
-
-            if (t.Health <= 0 && t.IsAlive)
-                ProcessPlayerDeath(t, player);
-            totalHits++;
-        }
-
-        // Hit mobs
         var mobTargets = FindMobTargetsInRange(player, world.Mobs.Values, range);
-        foreach (var mob in mobTargets)
+
+        for (int hit = 0; hit < hitCount; hit++)
         {
-            var (damage, isCrit) = CalculateAbilityDamageVsMob(player, baseDamage);
-            mob.Health = Math.Max(0, mob.Health - damage);
-            mob.IsDirty = true;
-            if (mob is EnhancedMob em2) em2.RequiresUpdate = true;
-
-            var combatEvent = new CombatEvent
+            // Hit players
+            foreach (var t in targets)
             {
-                EventType = isCrit ? "ability_damage_crit" : "ability_damage",
-                SourceId = player.PlayerId,
-                TargetId = mob.MobId,
-                Value = damage,
-                Position = mob.Position,
-                RoomId = player.CurrentRoomId
-            };
+                var (damage, isCrit) = CalculateAbilityDamage(player, baseDamage, t);
+                ApplyDamage(t, damage);
+                t.LastDamageTime = DateTime.UtcNow;
 
-            result.Events.Add(combatEvent);
-            OnCombatEvent?.Invoke(world.WorldId, combatEvent);
-            totalHits++;
+                result.Events.Add(new CombatEvent
+                {
+                    EventType = isCrit ? "ability_damage_crit" : "ability_damage",
+                    SourceId = player.PlayerId,
+                    TargetId = t.PlayerId,
+                    Value = damage,
+                    Position = t.Position,
+                    RoomId = player.CurrentRoomId,
+                    AbilityId = abilityId
+                });
+
+                OnCombatEvent?.Invoke(world.WorldId, result.Events.Last());
+
+                if (t.Health <= 0 && t.IsAlive)
+                    ProcessPlayerDeath(t, player);
+                totalHits++;
+            }
+
+            // Hit mobs
+            foreach (var mob in mobTargets)
+            {
+                var (damage, isCrit) = CalculateAbilityDamageVsMob(player, baseDamage, mob);
+                mob.Health = Math.Max(0, mob.Health - damage);
+                mob.IsDirty = true;
+                if (mob is EnhancedMob em2) em2.RequiresUpdate = true;
+
+                var combatEvent = new CombatEvent
+                {
+                    EventType = isCrit ? "ability_damage_crit" : "ability_damage",
+                    SourceId = player.PlayerId,
+                    TargetId = mob.MobId,
+                    Value = damage,
+                    Position = mob.Position,
+                    RoomId = player.CurrentRoomId,
+                    AbilityId = abilityId
+                };
+
+                result.Events.Add(combatEvent);
+                OnCombatEvent?.Invoke(world.WorldId, combatEvent);
+                totalHits++;
+            }
         }
 
         if (totalHits == 0)
@@ -890,6 +1088,11 @@ public class CombatSystem : ICombatSystem
         // Real projectile: spawn a traveling projectile instead of instant hit
         if (ability.ProjectileSpeed > 0)
         {
+            // Pass status effect info so projectile applies it on hit
+            var effectType = !string.IsNullOrEmpty(ability.AppliesEffect) ? ability.AppliesEffect : null;
+            var effectVal = ability.EffectValue;
+            var effectDur = ability.EffectDurationMs;
+
             if (ability.AbilityId == "bow_multishot")
             {
                 // 3 arrows with ±15° spread
@@ -897,14 +1100,16 @@ public class CombatSystem : ICombatSystem
                     player, ability.AbilityId,
                     direction, spreadAngleRad: 0.52f, count: 3,
                     ability.ProjectileSpeed, ability.ProjectileRadius,
-                    range, baseDamage, ability.AreaRadius, world);
+                    range, baseDamage, ability.AreaRadius, world,
+                    effectType, effectVal, effectDur);
             }
             else
             {
                 ProjectileSystem.SpawnProjectile(
                     player, ability.AbilityId,
                     direction, ability.ProjectileSpeed, ability.ProjectileRadius,
-                    range, baseDamage, ability.AreaRadius, world);
+                    range, baseDamage, ability.AreaRadius, world,
+                    effectType, effectVal, effectDur);
             }
 
             return new AbilityResult { Success = true, Message = "Projectile fired" };
@@ -914,7 +1119,7 @@ public class CombatSystem : ICombatSystem
 
         // Check players
         var closestPlayer = world.Players.Values
-            .Where(p => p.PlayerId != player.PlayerId && p.IsAlive && p.CurrentRoomId == player.CurrentRoomId)
+            .Where(p => p.PlayerId != player.PlayerId && p.IsAlive && p.CurrentRoomId == player.CurrentRoomId && p.TeamId != player.TeamId)
             .Where(p =>
             {
                 var dist = GameMathUtils.Distance(p.Position, player.Position);
@@ -976,7 +1181,7 @@ public class CombatSystem : ICombatSystem
         else if (closestMob != null)
         {
             // Hit mob
-            var (damage, isCrit) = CalculateAbilityDamageVsMob(player, baseDamage);
+            var (damage, isCrit) = CalculateAbilityDamageVsMob(player, baseDamage, closestMob);
             closestMob.Health = Math.Max(0, closestMob.Health - damage);
             closestMob.IsDirty = true;
 
@@ -1036,6 +1241,8 @@ public class CombatSystem : ICombatSystem
         {
             if (enemy.PlayerId == player.PlayerId || !enemy.IsAlive || enemy.CurrentRoomId != player.CurrentRoomId)
                 continue;
+            if (enemy.TeamId == player.TeamId)
+                continue;
             if (GameMathUtils.Distance(enemy.Position, center) > radius)
                 continue;
 
@@ -1065,7 +1272,7 @@ public class CombatSystem : ICombatSystem
         {
             if (mob.Health <= 0 || mob.RoomId != player.CurrentRoomId) continue;
             if (GameMathUtils.Distance(mob.Position, center) > radius) continue;
-            var (damage, isCrit) = CalculateAbilityDamageVsMob(player, baseDamage);
+            var (damage, isCrit) = CalculateAbilityDamageVsMob(player, baseDamage, mob);
             mob.Health = Math.Max(0, mob.Health - damage);
             mob.IsDirty = true;
             if (mob is EnhancedMob em3) em3.RequiresUpdate = true;
@@ -1089,7 +1296,7 @@ public class CombatSystem : ICombatSystem
         return result;
     }
 
-    private AbilityResult ExecuteDash(RealTimePlayer player, float distance, float speed, Vector2 target)
+    private AbilityResult ExecuteDash(RealTimePlayer player, float distance, float speed, Vector2 target, GameWorld? world = null)
     {
         var direction = (target - player.Position).GetNormalized();
         if (direction.Magnitude < 0.01f)
@@ -1102,6 +1309,22 @@ public class CombatSystem : ICombatSystem
             Math.Clamp(newPosition.X, 0, 240),
             Math.Clamp(newPosition.Y, 0, 240)
         );
+
+        // Binary search for furthest valid position along dash path (wall collision)
+        if (_movementSystem != null && world != null)
+        {
+            var validPos = player.Position;
+            for (int step = 1; step <= 10; step++)
+            {
+                var testPos = player.Position + direction * (distance * step / 10f);
+                testPos = new Vector2(Math.Clamp(testPos.X, 0, 240), Math.Clamp(testPos.Y, 0, 240));
+                if (_movementSystem.IsValidPosition(world, testPos))
+                    validPos = testPos;
+                else
+                    break;
+            }
+            newPosition = validPos;
+        }
 
         player.Position = newPosition;
         player.MoveTarget = null;
@@ -1122,7 +1345,9 @@ public class CombatSystem : ICombatSystem
             ExpiresAt = DateTime.UtcNow.AddMilliseconds(durationMs),
             SourcePlayerId = player.PlayerId
         });
-        player.DamageReduction = player.EquipmentDamageReduction + 0.2f;
+        // Shield DR: set to equipment base + 0.2 bonus (not cumulative — RemoveStatusEffect resets on expiry)
+        var shieldDR = player.EquipmentDamageReduction + 0.2f;
+        player.DamageReduction = Math.Max(player.DamageReduction, shieldDR);
 
         return new AbilityResult { Success = true, Message = "Shield activated" };
     }
@@ -1227,7 +1452,10 @@ public class CombatSystem : ICombatSystem
         if (ability.AppliesEffect == "purge")
         {
             var debuffs = new[] { "poison", "slow", "bleed", "weaken", "stun" };
-            player.StatusEffects.RemoveAll(e => debuffs.Contains(e.EffectType.ToLower()));
+            lock (player.StatusEffectsLock)
+            {
+                player.StatusEffects.RemoveAll(e => debuffs.Contains(e.EffectType.ToLower()));
+            }
             player.MovementSpeedModifier = 1f + player.EquipmentSpeedBonus;
             return new AbilityResult { Success = true, Message = "Debuffs purged" };
         }
@@ -1239,6 +1467,8 @@ public class CombatSystem : ICombatSystem
             foreach (var enemy in world.Players.Values)
             {
                 if (enemy.PlayerId == player.PlayerId || !enemy.IsAlive || enemy.CurrentRoomId != player.CurrentRoomId)
+                    continue;
+                if (enemy.TeamId == player.TeamId)
                     continue;
                 if (GameMathUtils.Distance(enemy.Position, player.Position) > range)
                     continue;
@@ -1345,42 +1575,68 @@ public class CombatSystem : ICombatSystem
         var damage = baseDamage * (1f + totalBonusDmg);
 
         // Variance ±10%
-        damage *= 1f + (_random.NextSingle() * 0.2f - 0.1f);
+        damage *= 1f + (Random.Shared.NextSingle() * 0.2f - 0.1f);
 
-        // Weaken debuff
-        var weaken = attacker.StatusEffects.FirstOrDefault(e => e.EffectType == "weaken");
-        if (weaken != null)
-            damage *= 1f - (weaken.Value * 0.01f);
+        // Weaken debuff & damage boost buff (read under lock for thread safety)
+        lock (attacker.StatusEffectsLock)
+        {
+            var weaken = attacker.StatusEffects.FirstOrDefault(e => e.EffectType == "weaken");
+            if (weaken != null)
+                damage *= 1f - (weaken.Value * 0.01f);
 
-        // Damage boost buff
-        var dmgBoost = attacker.StatusEffects.FirstOrDefault(e => e.EffectType == "damage_boost");
-        if (dmgBoost != null)
-            damage *= 1f + (dmgBoost.Value * 0.01f);
+            var dmgBoost = attacker.StatusEffects.FirstOrDefault(e => e.EffectType == "damage_boost");
+            if (dmgBoost != null)
+                damage *= 1f + (dmgBoost.Value * 0.01f);
+        }
 
         // Crit
-        bool isCrit = _random.NextSingle() < attacker.CritChance;
+        bool isCrit = Random.Shared.NextSingle() < attacker.CritChance;
         if (isCrit) damage *= 1.5f;
 
-        // Target DR
+        // Target DR (clamped to 70% to keep PvP TTK reasonable)
         if (target != null)
-            damage *= 1f - target.DamageReduction;
+            damage *= 1f - Math.Clamp(target.DamageReduction, 0f, 0.70f);
 
         return (Math.Max(1, (int)damage), isCrit);
     }
 
-    private (int damage, bool isCrit) CalculateBasicAttackDamageVsMob(RealTimePlayer attacker)
+    private (int damage, bool isCrit) CalculateBasicAttackDamageVsMob(RealTimePlayer attacker, Mob? mob = null)
     {
         var abilities = _equipmentSystem.GetAvailableAbilities(attacker);
         var basicAbility = abilities.FirstOrDefault(a => a.SlotIndex == 0 &&
             (a.Type == AbilityType.MeleeDamage || a.Type == AbilityType.ProjectileDamage));
 
         var baseDamage = basicAbility?.BaseDamage ?? 15f;
-        return CalculateDamage(attacker, baseDamage);
+        var (damage, isCrit) = CalculateDamage(attacker, baseDamage);
+        damage = ApplyMobDefenses(damage, mob);
+        return (damage, isCrit);
     }
 
-    private (int damage, bool isCrit) CalculateAbilityDamageVsMob(RealTimePlayer attacker, float abilityBaseDamage)
+    private (int damage, bool isCrit) CalculateAbilityDamageVsMob(RealTimePlayer attacker, float abilityBaseDamage, Mob? mob = null)
     {
-        return CalculateDamage(attacker, abilityBaseDamage);
+        var (damage, isCrit) = CalculateDamage(attacker, abilityBaseDamage);
+        damage = ApplyMobDefenses(damage, mob);
+        return (damage, isCrit);
+    }
+
+    /// <summary>
+    /// Applies mob armor/magic resistance to reduce incoming damage.
+    /// Uses the higher of armor and magic resistance for simplicity.
+    /// </summary>
+    private static int ApplyMobDefenses(int damage, Mob? mob)
+    {
+        if (mob is EnhancedMob em)
+        {
+            var armor = em.EnhancedStats.Armor;
+            var mr = em.EnhancedStats.MagicResistance;
+            var effectiveDefense = Math.Max(armor, mr);
+            if (effectiveDefense > 0)
+            {
+                var dr = GameMathUtils.CalculateDamageReduction(effectiveDefense);
+                damage = (int)(damage * (1f - dr));
+            }
+        }
+        return Math.Max(1, damage);
     }
 
     private (int damage, bool isCrit) CalculateBasicAttackDamage(RealTimePlayer attacker, RealTimePlayer target)
@@ -1407,6 +1663,15 @@ public class CombatSystem : ICombatSystem
             var shieldDamage = Math.Min(target.Shield, remainingDamage);
             target.Shield -= shieldDamage;
             remainingDamage -= shieldDamage;
+
+            if (target.Shield <= 0)
+            {
+                lock (target.StatusEffectsLock)
+                {
+                    target.StatusEffects.RemoveAll(e => e.EffectType == "shield");
+                }
+                target.DamageReduction = target.EquipmentDamageReduction;
+            }
         }
 
         if (remainingDamage > 0)
@@ -1417,10 +1682,9 @@ public class CombatSystem : ICombatSystem
 
     public void ProcessPlayerDeath(RealTimePlayer deadPlayer, RealTimePlayer? killer)
     {
-        // Guard against double death processing (idempotent)
-        if (!deadPlayer.IsAlive) return;
+        // Atomically transition from alive to dead — only one caller wins
+        if (!deadPlayer.TryKill()) return;
 
-        deadPlayer.IsAlive = false;
         deadPlayer.Health = 0;
         deadPlayer.DeathTime = DateTime.UtcNow;
         deadPlayer.ForceNextUpdate();
@@ -1496,7 +1760,19 @@ public class CombatSystem : ICombatSystem
                 if (kbTarget != null)
                 {
                     var dir = (kbTarget.Position - source.Position).GetNormalized();
-                    kbTarget.Position = kbTarget.Position + dir * modifier.ExtraEffectValue;
+                    var kbDistance = modifier.ExtraEffectValue;
+                    // Binary search for furthest valid position along knockback path (wall collision)
+                    var kbValidPos = kbTarget.Position;
+                    for (int step = 1; step <= 10; step++)
+                    {
+                        var testPos = kbTarget.Position + dir * (kbDistance * step / 10f);
+                        testPos = new Vector2(Math.Clamp(testPos.X, 0, 240), Math.Clamp(testPos.Y, 0, 240));
+                        if (_movementSystem != null && _movementSystem.IsValidPosition(world, testPos))
+                            kbValidPos = testPos;
+                        else
+                            break;
+                    }
+                    kbTarget.Position = kbValidPos;
                     kbTarget.MoveTarget = null;
                     kbTarget.IsPathing = false;
                     kbTarget.ForceNextUpdate();
@@ -1506,6 +1782,7 @@ public class CombatSystem : ICombatSystem
             case "life_steal":
                 // ExtraEffectValue = percentage of damage dealt to heal (e.g. 10 = 10%)
                 var lsHeal = Math.Max(1, (int)(modifier.ExtraEffectValue * 0.01f * damageDealt));
+                lsHeal = Math.Min(lsHeal, (int)(source.MaxHealth * 0.15f)); // Cap at 15% of max HP per proc
                 source.Health = Math.Min(source.MaxHealth, source.Health + lsHeal);
                 break;
 
@@ -1581,11 +1858,8 @@ public class CombatSystem : ICombatSystem
                     effect.LastTickTime = DateTime.UtcNow;
                     player.Health = Math.Max(0, player.Health - effect.Value);
                     player.LastDamageTime = DateTime.UtcNow;
-
-                    if (player.Health <= 0 && player.IsAlive)
-                    {
-                        ProcessPlayerDeath(player, null);
-                    }
+                    // Death processing is deferred to caller (UpdateStatusEffects)
+                    // to avoid calling ProcessPlayerDeath while holding StatusEffectsLock
                 }
                 break;
 
@@ -1621,13 +1895,36 @@ public class CombatSystem : ICombatSystem
             case "slow":
             case "speed":
             case "speed_boost":
-                player.MovementSpeedModifier = 1f + player.EquipmentSpeedBonus;
+                // Recalculate from all remaining effects (excluding the one being removed)
+                RecalculateSpeedModifier(player, effect);
                 break;
             case "shield":
                 player.DamageReduction = player.EquipmentDamageReduction;
                 player.Shield = 0;
+                player.MaxShield = 0;
                 break;
         }
+    }
+
+    /// <summary>
+    /// Recalculates MovementSpeedModifier from all active status effects,
+    /// excluding the specified effect that is being removed.
+    /// Must be called inside StatusEffectsLock.
+    /// </summary>
+    private void RecalculateSpeedModifier(RealTimePlayer player, StatusEffect excludeEffect)
+    {
+        float modifier = 1f + player.EquipmentSpeedBonus;
+        foreach (var e in player.StatusEffects)
+        {
+            if (ReferenceEquals(e, excludeEffect)) continue;
+
+            var type = e.EffectType.ToLower();
+            if (type == "slow")
+                modifier = Math.Max(0.3f, modifier + (e.Value * 0.01f));
+            else if (type == "speed" || type == "speed_boost")
+                modifier += (e.Value * 0.01f);
+        }
+        player.MovementSpeedModifier = modifier;
     }
 
     #endregion

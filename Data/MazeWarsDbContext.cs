@@ -10,6 +10,7 @@ public class MazeWarsDbContext : DbContext
     }
 
     public DbSet<PlayerAccount> Players { get; set; } = null!;
+    public DbSet<PlayerCharacter> Characters { get; set; } = null!;
     public DbSet<StashedItem> StashedItems { get; set; } = null!;
     public DbSet<MatchRecord> MatchHistory { get; set; } = null!;
 
@@ -18,6 +19,10 @@ public class MazeWarsDbContext : DbContext
         modelBuilder.Entity<PlayerAccount>(entity =>
         {
             entity.HasIndex(e => e.PlayerName).IsUnique();
+            entity.HasMany(e => e.Characters)
+                  .WithOne(e => e.Account)
+                  .HasForeignKey(e => e.PlayerAccountId)
+                  .OnDelete(DeleteBehavior.Cascade);
             entity.HasMany(e => e.StashedItems)
                   .WithOne(e => e.Player)
                   .HasForeignKey(e => e.PlayerAccountId)
@@ -26,6 +31,11 @@ public class MazeWarsDbContext : DbContext
                   .WithOne(e => e.Player)
                   .HasForeignKey(e => e.PlayerAccountId)
                   .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<PlayerCharacter>(entity =>
+        {
+            entity.HasIndex(e => e.CharacterName).IsUnique();
         });
     }
 }

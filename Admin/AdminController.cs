@@ -2,6 +2,8 @@
 using MazeWars.GameServer.Network.Services;
 using Microsoft.AspNetCore.Mvc;
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace MazeWars.GameServer.Admin;
 
@@ -12,20 +14,42 @@ public class AdminController : ControllerBase
     private readonly RealTimeGameEngine _gameEngine;
     private readonly UdpNetworkService _networkService;
     private readonly ILogger<AdminController> _logger;
+    private readonly IConfiguration _config;
 
     public AdminController(
         RealTimeGameEngine gameEngine,
         UdpNetworkService networkService,
-        ILogger<AdminController> logger)
+        ILogger<AdminController> logger,
+        IConfiguration config)
     {
         _gameEngine = gameEngine;
         _networkService = networkService;
         _logger = logger;
+        _config = config;
+    }
+
+    private IActionResult? ValidateAdminKey()
+    {
+        var requireKey = _config.GetValue<bool>("Security:AdminApi:RequireAdminKey");
+        if (!requireKey) return null; // Disabled in dev
+
+        var expectedKey = _config.GetValue<string>("Security:AdminApi:AdminApiKey") ?? "";
+        var providedKey = Request.Headers["X-Admin-Key"].FirstOrDefault() ?? "";
+        if (string.IsNullOrEmpty(providedKey) ||
+            !CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(providedKey), Encoding.UTF8.GetBytes(expectedKey)))
+        {
+            _logger.LogWarning("Unauthorized admin API access attempt from {IP}", HttpContext.Connection.RemoteIpAddress);
+            return Unauthorized(new { error = "Invalid or missing admin API key" });
+        }
+        return null;
     }
 
     [HttpGet("stats")]
     public IActionResult GetServerStats()
     {
+        var authError = ValidateAdminKey();
+        if (authError != null) return authError;
+
         var gameStats = _gameEngine.GetServerStats();
         var networkStats = _networkService.GetNetworkStats();
 
@@ -51,6 +75,9 @@ public class AdminController : ControllerBase
     [HttpGet("worlds")]
     public IActionResult GetWorlds()
     {
+        var authError = ValidateAdminKey();
+        if (authError != null) return authError;
+
         var worlds = _gameEngine.GetWorldStates();
         return Ok(worlds);
     }
@@ -58,6 +85,8 @@ public class AdminController : ControllerBase
     [HttpPost("worlds/{worldId}/force-complete")]
     public IActionResult ForceCompleteWorld(string worldId)
     {
+        var authError = ValidateAdminKey();
+        if (authError != null) return authError;
         try
         {
             _gameEngine.ForceCompleteWorld(worldId);
@@ -74,6 +103,8 @@ public class AdminController : ControllerBase
     [HttpPost("kick-player")]
     public IActionResult KickPlayer([FromBody] KickPlayerRequest request)
     {
+        var authError = ValidateAdminKey();
+        if (authError != null) return authError;
         try
         {
             _networkService.KickPlayer(request.PlayerId, request.Reason);
@@ -90,6 +121,8 @@ public class AdminController : ControllerBase
     [HttpPost("broadcast")]
     public IActionResult BroadcastMessage([FromBody] BroadcastRequest request)
     {
+        var authError = ValidateAdminKey();
+        if (authError != null) return authError;
         try
         {
             _networkService.BroadcastAdminMessage(request.Message, request.WorldId);
@@ -104,7 +137,8 @@ public class AdminController : ControllerBase
 
     private double GetCPUUsage()
     {
-        return Math.Round(Random.Shared.NextDouble() * 100, 2);
+        var process = Process.GetCurrentProcess();
+        return Math.Round(process.TotalProcessorTime.TotalMilliseconds / (DateTime.UtcNow - process.StartTime.ToUniversalTime()).TotalMilliseconds / Environment.ProcessorCount * 100, 2);
     }
 }
 

@@ -20,6 +20,8 @@ using MazeWars.GameServer.Services.AI;
 using MazeWars.GameServer.Engine.Network;
 using MazeWars.GameServer.Engine.Managers;
 using MazeWars.GameServer.Engine.Stash;
+using MazeWars.GameServer.Engine.Vendor;
+using MazeWars.GameServer.Engine.Challenges;
 using MazeWars.GameServer.Data;
 using MazeWars.GameServer.Data.Repositories;
 using Microsoft.EntityFrameworkCore;
@@ -107,10 +109,12 @@ try
     builder.Services.AddSingleton<IMobAISystem, MobAISystem>();
 
     builder.Services.AddSingleton<StashService>();
+    builder.Services.AddSingleton<VendorService>();
+    builder.Services.AddSingleton<ChallengeService>();
 
     // Database
     builder.Services.AddDbContext<MazeWarsDbContext>(options =>
-        options.UseSqlite("Data Source=mazewars.db"));
+        options.UseSqlite("Data Source=mazewars.db;Cache=Shared"));
     builder.Services.AddSingleton<IPlayerRepository, PlayerRepository>();
 
     // ⭐ REFACTORED: Managers (Singleton - separated concerns for better maintainability)
@@ -187,12 +191,12 @@ try
         }
     });
 
-    // CORS for web clients (if needed)
+    // CORS — restricted to localhost for alpha (game client uses HTTP directly)
     builder.Services.AddCors(options =>
     {
         options.AddPolicy("GameClientPolicy", policy =>
         {
-            policy.AllowAnyOrigin()
+            policy.WithOrigins("http://localhost:5000", "http://127.0.0.1:5000")
                   .AllowAnyMethod()
                   .AllowAnyHeader();
         });
@@ -229,6 +233,9 @@ try
         var conn = db.Database.GetDbConnection();
         conn.Open();
         using var cmd = conn.CreateCommand();
+        // Enable WAL mode for better concurrent read/write performance
+        cmd.CommandText = "PRAGMA journal_mode=WAL";
+        cmd.ExecuteNonQuery();
         // Helper: ALTER TABLE ADD COLUMN is a no-op in SQLite if column already exists (we catch the error)
         var migrations = new[]
         {
@@ -237,6 +244,29 @@ try
             "ALTER TABLE Players ADD COLUMN Gold INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE MatchHistory ADD COLUMN XpGained INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE MatchHistory ADD COLUMN GoldEarned INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE Players ADD COLUMN PasswordHash TEXT",
+            "ALTER TABLE Players ADD COLUMN PasswordSalt TEXT",
+            @"CREATE TABLE IF NOT EXISTS Characters (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                PlayerAccountId INTEGER NOT NULL,
+                CharacterName TEXT NOT NULL,
+                Class TEXT NOT NULL DEFAULT 'scout',
+                AppearancePreset INTEGER NOT NULL DEFAULT 0,
+                CurrentLevel INTEGER NOT NULL DEFAULT 1,
+                TotalExperience INTEGER NOT NULL DEFAULT 0,
+                CareerKills INTEGER NOT NULL DEFAULT 0,
+                CareerDeaths INTEGER NOT NULL DEFAULT 0,
+                CareerDamageDealt INTEGER NOT NULL DEFAULT 0,
+                CareerHealingDone INTEGER NOT NULL DEFAULT 0,
+                TotalMatchesPlayed INTEGER NOT NULL DEFAULT 0,
+                TotalExtractions INTEGER NOT NULL DEFAULT 0,
+                CreatedAt TEXT NOT NULL DEFAULT '2026-01-01',
+                FOREIGN KEY (PlayerAccountId) REFERENCES Players(Id) ON DELETE CASCADE
+            )",
+            "CREATE UNIQUE INDEX IF NOT EXISTS IX_Characters_CharacterName ON Characters (CharacterName)",
+            "ALTER TABLE StashedItems ADD COLUMN LootId TEXT DEFAULT ''",
+            "ALTER TABLE Characters ADD COLUMN EquipmentJson TEXT DEFAULT '{}'",
+            "ALTER TABLE Characters ADD COLUMN BackpackJson TEXT DEFAULT '[]'",
         };
         foreach (var sql in migrations)
         {
@@ -246,11 +276,34 @@ try
                 cmd.ExecuteNonQuery();
                 Log.Information("DB migration applied: {Sql}", sql);
             }
-            catch (Exception)
+            catch (Exception ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase)
+                                    || ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase))
             {
-                // Column already exists — ignore
+                // Column already exists — expected for idempotent migrations
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "DB migration failed: {Sql}", sql);
             }
         }
+
+        // Deduplicate stash items: keep only one row per (PlayerAccountId, ItemName, PropertiesJson)
+        try
+        {
+            cmd.CommandText = @"
+                DELETE FROM StashedItems WHERE Id NOT IN (
+                    SELECT MIN(Id) FROM StashedItems
+                    GROUP BY PlayerAccountId, ItemName, ItemType, Rarity, PropertiesJson
+                )";
+            var deleted = cmd.ExecuteNonQuery();
+            if (deleted > 0)
+                Log.Information("Stash dedup: removed {Count} duplicate stash items", deleted);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning("Stash dedup skipped: {Error}", ex.Message);
+        }
+
         conn.Close();
 
         Log.Information("Database initialized (SQLite: mazewars.db)");
@@ -355,7 +408,6 @@ try
             {
                 Name = "MazeWars Game Server",
                 Version = "1.0.0",
-                Environment = app.Environment.EnvironmentName,
                 StartTime = System.Diagnostics.Process.GetCurrentProcess().StartTime,
                 Uptime = systemMetrics.GetUptime(),
                 ServerId = gameConfig.ServerId
@@ -370,15 +422,6 @@ try
                 ThreadCount = systemMetrics.GetThreadCount(),
                 Platform = Environment.OSVersion.Platform.ToString(),
                 ProcessorCount = Environment.ProcessorCount
-            },
-            Configuration = new // NUEVO
-            {
-                MaxPlayersPerWorld = gameConfig.MaxPlayersPerWorld,
-                MaxWorldInstances = gameConfig.MaxWorldInstances,
-                TargetFPS = gameConfig.TargetFPS,
-                LobbyMinPlayers = gameConfig.LobbySettings?.MinPlayersToStart ?? 2,
-                LobbyMaxWaitTime = gameConfig.LobbySettings?.MaxWaitTimeSeconds ?? 30,
-                MaxTeamSize = gameConfig.GameBalance.MaxTeamSize
             }
         });
     });
@@ -403,9 +446,21 @@ try
         });
     });
 
-    // Metrics endpoint (for monitoring systems) - ACTUALIZADO con métricas de lobby
-    app.MapGet("/metrics", (IServiceProvider services) =>
+    // Metrics endpoint (admin-only)
+    app.MapGet("/metrics", (HttpContext ctx, IServiceProvider services) =>
     {
+        var config = services.GetRequiredService<IConfiguration>();
+        var requireKey = config.GetValue<bool>("Security:AdminApi:RequireAdminKey");
+        if (requireKey)
+        {
+            var expectedKey = config.GetValue<string>("Security:AdminApi:AdminApiKey") ?? "";
+            var providedKey = ctx.Request.Headers["X-Admin-Key"].FirstOrDefault() ?? "";
+            if (string.IsNullOrEmpty(providedKey) ||
+                !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                    System.Text.Encoding.UTF8.GetBytes(providedKey),
+                    System.Text.Encoding.UTF8.GetBytes(expectedKey)))
+                return Results.Unauthorized();
+        }
         var gameEngine = services.GetRequiredService<RealTimeGameEngine>();
         var networkService = services.GetRequiredService<UdpNetworkService>();
         var systemMetrics = services.GetRequiredService<ISystemMetrics>();

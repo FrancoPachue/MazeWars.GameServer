@@ -12,7 +12,10 @@ public class PlayerAccount
     public string PlayerName { get; set; } = string.Empty;
 
     [MaxLength(256)]
-    public string? PasswordHash { get; set; } // Nullable for now (no auth yet)
+    public string? PasswordHash { get; set; }
+
+    [MaxLength(64)]
+    public string? PasswordSalt { get; set; }
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime LastLoginAt { get; set; } = DateTime.UtcNow;
@@ -33,6 +36,7 @@ public class PlayerAccount
     public int TotalExtractions { get; set; }
 
     // Navigation
+    public List<PlayerCharacter> Characters { get; set; } = new();
     public List<StashedItem> StashedItems { get; set; } = new();
     public List<MatchRecord> MatchHistory { get; set; } = new();
 }

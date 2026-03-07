@@ -14,4 +14,5 @@ public class WorldLobby
     public Dictionary<string, int> TeamPlayerCounts { get; set; } = new();
     public ConcurrentDictionary<string, RealTimePlayer> Players { get; set; } = new();
     public string GameMode { get; set; } = "trios";
+    public string DifficultyTier { get; set; } = "normal";
 }

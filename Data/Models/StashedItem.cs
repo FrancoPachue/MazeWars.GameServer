@@ -8,6 +8,10 @@ public class StashedItem
     [Key]
     public int Id { get; set; }
 
+    /// <summary>Unique item identifier (preserved across saves)</summary>
+    [MaxLength(100)]
+    public string LootId { get; set; } = string.Empty;
+
     public int PlayerAccountId { get; set; }
 
     [ForeignKey(nameof(PlayerAccountId))]

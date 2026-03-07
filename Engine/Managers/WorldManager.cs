@@ -21,7 +21,7 @@ public class WorldManager
     private readonly Dictionary<string, GameWorld> _worlds = new();
     private readonly Dictionary<string, LootTable> _baseLootTables = new();
     private readonly object _worldsLock = new object();
-    private readonly Random _random = new();
+
 
     public WorldManager(
         ILogger<WorldManager> _logger,
@@ -60,17 +60,24 @@ public class WorldManager
                 WorldId = worldId,
                 GameMode = gameMode,
                 ModeConfig = modeConfig,
-                Rooms = GenerateWorldRooms(gridX, gridY),
+                Rooms = gameMode == "arena" ? GenerateArenaRoom() : GenerateWorldRooms(gridX, gridY),
                 ExtractionPoints = GenerateExtractionPoints(gridX, gridY),
                 LootTables = new List<LootTable>(_baseLootTables.Values),
                 CreatedAt = DateTime.UtcNow,
                 Players = new ConcurrentDictionary<string, RealTimePlayer>(lobbyPlayers)
             };
 
-            GenerateLockedDoors(world);
-            GenerateDoors(world);
-            GenerateRevivalAltars(world);
-            SpawnInitialLoot(world);
+            if (gameMode == "arena")
+            {
+                SpawnArenaChests(world);
+            }
+            else
+            {
+                GenerateLockedDoors(world);
+                GenerateDoors(world);
+                GenerateRevivalAltars(world);
+                SpawnInitialLoot(world);
+            }
 
             _worlds[worldId] = world;
 
@@ -84,9 +91,9 @@ public class WorldManager
     /// <summary>
     /// Generate rooms in a grid layout with connections.
     /// </summary>
-    private Dictionary<string, Room> GenerateWorldRooms(int gridSizeX = 0, int gridSizeY = 0)
+    private ConcurrentDictionary<string, Room> GenerateWorldRooms(int gridSizeX = 0, int gridSizeY = 0)
     {
-        var rooms = new Dictionary<string, Room>();
+        var rooms = new ConcurrentDictionary<string, Room>();
         var settings = _settings.WorldGeneration;
         var sizeX = gridSizeX > 0 ? gridSizeX : settings.WorldSizeX;
         var sizeY = gridSizeY > 0 ? gridSizeY : settings.WorldSizeY;
@@ -111,8 +118,8 @@ public class WorldManager
                 bool isEdge = x == 0 || x == maxX || y == 0 || y == maxY;
                 if (!isEdge)
                 {
-                    jitterX = ((float)_random.NextDouble() - 0.5f) * 2f * settings.RoomPositionJitter;
-                    jitterY = ((float)_random.NextDouble() - 0.5f) * 2f * settings.RoomPositionJitter;
+                    jitterX = ((float)Random.Shared.NextDouble() - 0.5f) * 2f * settings.RoomPositionJitter;
+                    jitterY = ((float)Random.Shared.NextDouble() - 0.5f) * 2f * settings.RoomPositionJitter;
                 }
 
                 var room = new Room
@@ -145,6 +152,25 @@ public class WorldManager
     }
 
     /// <summary>
+    /// Generate a single large room for arena mode.
+    /// </summary>
+    private ConcurrentDictionary<string, Room> GenerateArenaRoom()
+    {
+        var rooms = new ConcurrentDictionary<string, Room>();
+        var center = new Vector2(55, 55);
+        rooms["room_0_0"] = new Room
+        {
+            RoomId = "room_0_0",
+            Position = center,
+            Size = new Vector2(60, 60),
+            Connections = new List<string>(),
+            RoomType = "boss_arena"
+        };
+        _logger.LogDebug("Generated arena room (60x60 at {Center})", center);
+        return rooms;
+    }
+
+    /// <summary>
     /// Calculate room size based on room type. Boss arenas are large, patrols are small/medium.
     /// Returns a slightly non-square size for visual variety.
     /// </summary>
@@ -155,14 +181,13 @@ public class WorldManager
         switch (roomType)
         {
             case "spawn":
-            case "extraction_zone":
-                // Small starting/extraction cells
+                // Small starting cells
                 minSize = settings.RoomSizeSmallMin;
                 maxSize = settings.RoomSizeSmallMin + 4;
                 break;
             case "patrol":
             case "guard_post":
-                if (_random.NextDouble() < 0.5)
+                if (Random.Shared.NextDouble() < 0.5)
                 {
                     minSize = settings.RoomSizeSmallMin;
                     maxSize = settings.RoomSizeSmallMax;
@@ -179,7 +204,7 @@ public class WorldManager
                 break;
             case "elite_chamber":
             case "treasure_vault":
-                if (_random.NextDouble() < 0.3)
+                if (Random.Shared.NextDouble() < 0.3)
                 {
                     minSize = settings.RoomSizeMediumMin;
                     maxSize = settings.RoomSizeMediumMax;
@@ -200,9 +225,9 @@ public class WorldManager
                 break;
         }
 
-        var baseSize = minSize + (float)_random.NextDouble() * (maxSize - minSize);
+        var baseSize = minSize + (float)Random.Shared.NextDouble() * (maxSize - minSize);
         // Slight aspect ratio variation (±7.5%) so rooms aren't perfect squares
-        var aspectVariation = 1f + ((float)_random.NextDouble() - 0.5f) * 0.15f;
+        var aspectVariation = 1f + ((float)Random.Shared.NextDouble() - 0.5f) * 0.15f;
 
         return new Vector2(baseSize, baseSize * aspectVariation);
     }
@@ -232,7 +257,7 @@ public class WorldManager
                     keyType = "gold";
                 // Treasure vault connections have 50% chance of silver lock
                 else if ((room.RoomType == "treasure_vault" || neighbor.RoomType == "treasure_vault")
-                         && _random.NextDouble() < 0.5)
+                         && Random.Shared.NextDouble() < 0.5)
                     keyType = "silver";
 
                 if (keyType != null)
@@ -272,8 +297,12 @@ public class WorldManager
 
                 if (!processed.Add(connectionId)) continue;
 
-                // Spawn room doors start open so players can leave spawn
-                bool isSpawnDoor = room.RoomType == "spawn" || neighbor.RoomType == "spawn";
+                // Spawn room doors start open ONLY for vertical exits (leading into the dungeon).
+                // Horizontal doors within the spawn row stay closed to preserve visible door barriers.
+                bool isSpawnAdjacent = room.RoomType == "spawn" || neighbor.RoomType == "spawn";
+                bool isVerticalConnection = Math.Abs(room.Position.Y - neighbor.Position.Y) >
+                                            Math.Abs(room.Position.X - neighbor.Position.X);
+                bool isSpawnDoor = isSpawnAdjacent && isVerticalConnection;
 
                 var door = new RoomDoor
                 {
@@ -304,7 +333,7 @@ public class WorldManager
         foreach (var room in world.Rooms.Values)
         {
             // Skip boss rooms, spawn rooms, and empty rooms
-            if (room.RoomType is "boss_arena" or "spawn" or "empty" or "extraction_zone")
+            if (room.RoomType is "boss_arena" or "spawn" or "empty")
                 continue;
 
             roomCounter++;
@@ -314,8 +343,8 @@ public class WorldManager
                 continue;
 
             // Altar position: room center + small random offset
-            var offsetX = ((float)_random.NextDouble() - 0.5f) * room.Size.X * 0.3f;
-            var offsetY = ((float)_random.NextDouble() - 0.5f) * room.Size.Y * 0.3f;
+            var offsetX = ((float)Random.Shared.NextDouble() - 0.5f) * room.Size.X * 0.3f;
+            var offsetY = ((float)Random.Shared.NextDouble() - 0.5f) * room.Size.Y * 0.3f;
 
             var altarId = $"altar_{room.RoomId}";
             var altar = new RevivalAltar
@@ -336,11 +365,11 @@ public class WorldManager
 
     /// <summary>
     /// Check if a grid position is an empty room that should be skipped.
-    /// Corners are now extraction_zone rooms and are NOT empty.
+    /// No positions are empty — all grid cells are rooms.
     /// </summary>
     private static bool IsEmptyPosition(int x, int y, int maxX, int maxY)
     {
-        return false; // No positions are skipped — corners are now extraction_zone rooms
+        return false; // No positions are skipped — all grid cells are rooms
     }
 
     /// <summary>
@@ -350,7 +379,7 @@ public class WorldManager
     private string AssignRoomType(int x, int y, int maxX, int maxY)
     {
         bool isCorner = (x == 0 || x == maxX) && (y == 0 || y == maxY);
-        if (isCorner) return "extraction_zone";
+        if (isCorner) return "patrol";
 
         // Team spawn rooms: small safe cells with no mobs
         bool isTeamSpawn = (x == 1 && y == 0) || (x == maxX - 1 && y == 0) ||
@@ -379,7 +408,7 @@ public class WorldManager
         // Distance 2 from center, non-edge: mix of elite/treasure/ambush
         if (distFromCenter == 2 && !isEdge)
         {
-            var roll = _random.NextDouble();
+            var roll = Random.Shared.NextDouble();
             if (roll < 0.35) return "elite_chamber";
             if (roll < 0.65) return "treasure_vault";
             return "ambush";
@@ -388,14 +417,14 @@ public class WorldManager
         // Edge rooms (non-corner): patrol/guard/ambush
         if (isEdge)
         {
-            var roll = _random.NextDouble();
+            var roll = Random.Shared.NextDouble();
             if (roll < 0.35) return "patrol";
             if (roll < 0.65) return "guard_post";
             return "ambush";
         }
 
         // Remaining inner rooms
-        var innerRoll = _random.NextDouble();
+        var innerRoll = Random.Shared.NextDouble();
         if (innerRoll < 0.30) return "ambush";
         if (innerRoll < 0.55) return "guard_post";
         if (innerRoll < 0.75) return "elite_chamber";
@@ -435,17 +464,15 @@ public class WorldManager
     /// Generate a single room for the lobby arena.
     /// One 60x60 room centered at (75, 75).
     /// </summary>
-    private Dictionary<string, Room> GenerateLobbyArenaRooms()
+    private ConcurrentDictionary<string, Room> GenerateLobbyArenaRooms()
     {
-        var rooms = new Dictionary<string, Room>
+        var rooms = new ConcurrentDictionary<string, Room>();
+        rooms["lobby_arena"] = new Room
         {
-            ["lobby_arena"] = new Room
-            {
-                RoomId = "lobby_arena",
-                Position = new Vector2(75, 75),
-                Size = new Vector2(60, 60),
-                Connections = new List<string>()
-            }
+            RoomId = "lobby_arena",
+            Position = new Vector2(75, 75),
+            Size = new Vector2(60, 60),
+            Connections = new List<string>()
         };
 
         _logger.LogDebug("Generated lobby arena room (60x60 at center 75,75)");
@@ -473,40 +500,8 @@ public class WorldManager
     /// </summary>
     private Dictionary<string, ExtractionPoint> GenerateExtractionPoints(int gridSizeX = 0, int gridSizeY = 0)
     {
-        var extractionPoints = new Dictionary<string, ExtractionPoint>();
-        var settings = _settings.WorldGeneration;
-        var sizeX = gridSizeX > 0 ? gridSizeX : settings.WorldSizeX;
-        var sizeY = gridSizeY > 0 ? gridSizeY : settings.WorldSizeY;
-
-        var centerX = (sizeX - 1) / 2;
-        var centerY = (sizeY - 1) / 2;
-
-        var maxXIdx = sizeX - 1;
-        var maxYIdx = sizeY - 1;
-
-        var cornerPositions = new[]
-        {
-            new { Id = "extract_0_0", Position = new Vector2(0, 0), RoomId = "room_0_0" },
-            new { Id = $"extract_{maxXIdx}_0", Position = new Vector2(maxXIdx * settings.RoomSpacing, 0), RoomId = $"room_{maxXIdx}_0" },
-            new { Id = $"extract_0_{maxYIdx}", Position = new Vector2(0, maxYIdx * settings.RoomSpacing), RoomId = $"room_0_{maxYIdx}" },
-            new { Id = $"extract_{maxXIdx}_{maxYIdx}", Position = new Vector2(maxXIdx * settings.RoomSpacing, maxYIdx * settings.RoomSpacing), RoomId = $"room_{maxXIdx}_{maxYIdx}" },
-            new { Id = "extract_center", Position = new Vector2(centerX * settings.RoomSpacing, centerY * settings.RoomSpacing), RoomId = $"room_{centerX}_{centerY}" }
-        };
-
-        foreach (var corner in cornerPositions)
-        {
-            extractionPoints[corner.Id] = new ExtractionPoint
-            {
-                ExtractionId = corner.Id,
-                Position = corner.Position,
-                RoomId = corner.RoomId,
-                IsActive = true, // Extraction always available from game start
-                ExtractionTimeSeconds = _settings.GameBalance.ExtractionTimeSeconds
-            };
-        }
-
-        _logger.LogDebug("Generated {Count} extraction points", extractionPoints.Count);
-        return extractionPoints;
+        // Extraction portals are now spawned dynamically during corruption waves.
+        return new Dictionary<string, ExtractionPoint>();
     }
 
     /// <summary>
@@ -520,7 +515,7 @@ public class WorldManager
 
         foreach (var room in world.Rooms.Values)
         {
-            if (room.RoomType is "empty" or "extraction_zone" or "spawn") continue;
+            if (room.RoomType is "empty" or "spawn") continue;
 
             // Number of chests based on room type
             var numChests = room.RoomType switch
@@ -537,8 +532,8 @@ public class WorldManager
             for (int c = 0; c < numChests; c++)
             {
                 // Position chest within room
-                var offsetX = (float)(_random.NextDouble() - 0.5) * room.Size.X * 0.6f;
-                var offsetY = (float)(_random.NextDouble() - 0.5) * room.Size.Y * 0.6f;
+                var offsetX = (float)(Random.Shared.NextDouble() - 0.5) * room.Size.X * 0.6f;
+                var offsetY = (float)(Random.Shared.NextDouble() - 0.5) * room.Size.Y * 0.6f;
                 var chestPos = new Vector2(room.Position.X + offsetX, room.Position.Y + offsetY);
 
                 var container = new LootContainer
@@ -554,16 +549,16 @@ public class WorldManager
                 // 2-4 items per chest depending on room type
                 var itemCount = room.RoomType switch
                 {
-                    "treasure_vault" => _random.Next(3, 5),
-                    "boss_arena" => _random.Next(2, 4),
-                    "elite_chamber" => _random.Next(2, 4),
-                    _ => _random.Next(1, 3)
+                    "treasure_vault" => Random.Shared.Next(3, 5),
+                    "boss_arena" => Random.Shared.Next(2, 4),
+                    "elite_chamber" => Random.Shared.Next(2, 4),
+                    _ => Random.Shared.Next(1, 3)
                 };
 
                 for (int i = 0; i < itemCount; i++)
                 {
                     // In treasure_vault and boss_arena: 15% chance for valuable items
-                    if ((room.RoomType is "treasure_vault" or "boss_arena") && _random.NextDouble() < 0.15)
+                    if ((room.RoomType is "treasure_vault" or "boss_arena") && Random.Shared.NextDouble() < 0.15)
                     {
                         var valuable = _lootSystem.CreateValuableItem(room, chestPos);
                         container.Contents.Add(valuable);
@@ -571,14 +566,14 @@ public class WorldManager
                     }
 
                     // 70% equipment, 30% consumable
-                    if (_random.NextDouble() < 0.7 && allEquipIds.Count > 0)
+                    if (Random.Shared.NextDouble() < 0.7 && allEquipIds.Count > 0)
                     {
-                        var eqId = allEquipIds[_random.Next(allEquipIds.Count)];
+                        var eqId = allEquipIds[Random.Shared.Next(allEquipIds.Count)];
                         var equipDef = EquipmentRegistry.Get(eqId);
                         if (equipDef == null) continue;
 
-                        var rarity = ItemRaritySystem.RollRarity(_random, room.RoomType, "patrol");
-                        var qualityTier = ItemRaritySystem.RollQualityTier(_random);
+                        var rarity = ItemRaritySystem.RollRarity(Random.Shared, room.RoomType, "patrol");
+                        var qualityTier = ItemRaritySystem.RollQualityTier(Random.Shared);
                         var qualityName = (int)qualityTier > 0 ? $"{ItemRaritySystem.GetQualityName((int)qualityTier)} " : "";
                         var rarityName = (int)rarity > 0 ? $"{ItemRaritySystem.GetRarityName((int)rarity)} " : "";
 
@@ -601,7 +596,7 @@ public class WorldManager
                     }
                     else
                     {
-                        var roll = _random.NextDouble();
+                        var roll = Random.Shared.NextDouble();
                         var (potionName, props) = roll switch
                         {
                             < 0.30 => ("Health Potion", new Dictionary<string, object> { ["heal"] = 50 }),
@@ -632,6 +627,70 @@ public class WorldManager
 
         _logger.LogInformation("Spawned {Count} chests across rooms in world {WorldId}",
             chestCount, world.WorldId);
+    }
+
+    /// <summary>
+    /// Spawn two arena chests (one per side) with ALL equipment at rarity 3.
+    /// </summary>
+    private void SpawnArenaChests(GameWorld world)
+    {
+        var allEquipIds = EquipmentRegistry.GetAllBaseIds();
+        var rooms = world.Rooms.Values.ToList();
+        if (rooms.Count == 0) return;
+
+        // Place two chests on opposite sides of the arena room
+        var arenaRoom = rooms.First();
+        var chestPositions = new[]
+        {
+            (pos: arenaRoom.Position + new Vector2(-15, 0), id: "arena_chest_left"),
+            (pos: arenaRoom.Position + new Vector2(15, 0), id: "arena_chest_right"),
+        };
+
+        foreach (var (pos, id) in chestPositions)
+        {
+            var container = new LootContainer
+            {
+                ContainerId = id,
+                ContainerType = "chest",
+                Position = pos,
+                RoomId = arenaRoom.RoomId,
+                DespawnAfterSeconds = 0,
+                DisplayName = "Arena Chest"
+            };
+
+            // Add every equipment piece at rarity 3 (Rare)
+            foreach (var eqId in allEquipIds)
+            {
+                var equipDef = EquipmentRegistry.Get(eqId);
+                if (equipDef == null) continue;
+
+                var rarity = 3;
+                var qualityTier = 2;
+                var rarityName = ItemRaritySystem.GetRarityName(rarity);
+
+                container.Contents.Add(new LootItem
+                {
+                    LootId = Guid.NewGuid().ToString(),
+                    ItemName = $"{rarityName} {equipDef.DisplayName}",
+                    ItemType = equipDef.Slot is EquipmentSlot.Weapon ? "weapon" : "armor",
+                    Rarity = rarity,
+                    Position = pos,
+                    RoomId = arenaRoom.RoomId,
+                    SpawnedAt = DateTime.UtcNow,
+                    Properties = new Dictionary<string, object>
+                    {
+                        ["equipment_id"] = eqId,
+                        ["rarity"] = rarity,
+                        ["quality"] = qualityTier
+                    }
+                });
+            }
+
+            world.LootContainers[container.ContainerId] = container;
+        }
+
+        _logger.LogInformation("Spawned 2 arena chests with {Count} equipment each in world {WorldId}",
+            allEquipIds.Count, world.WorldId);
     }
 
     /// <summary>
@@ -881,17 +940,44 @@ public class WorldManager
         var spacing = settings.RoomSpacing;
         var sizeX = modeConfig?.GridSizeX ?? settings.WorldSizeX;
         var sizeY = modeConfig?.GridSizeY ?? settings.WorldSizeY;
+
+        // Arena: single room at (55,55), spread players around the center
+        if (sizeX == 1 && sizeY == 1)
+        {
+            var hash = Math.Abs(teamId.GetHashCode());
+            var arenaCenter = new Vector2(55, 55);
+            var arenaSpawns = new[]
+            {
+                arenaCenter + new Vector2(-8, -8),
+                arenaCenter + new Vector2(8, -8),
+                arenaCenter + new Vector2(-8, 8),
+                arenaCenter + new Vector2(8, 8)
+            };
+            return arenaSpawns[hash % arenaSpawns.Length];
+        }
+
         var maxX = (sizeX - 1) * spacing;
         var maxY = (sizeY - 1) * spacing;
 
-        return teamId.ToLower() switch
+        // Named teams get specific corners
+        switch (teamId.ToLower())
         {
-            "team1" => new Vector2(spacing, 0),
-            "team2" => new Vector2(maxX - spacing, 0),
-            "team3" => new Vector2(spacing, maxY),
-            "team4" => new Vector2(maxX - spacing, maxY),
-            _ => new Vector2(maxX / 2, maxY / 2)
+            case "team1": return new Vector2(spacing, 0);
+            case "team2": return new Vector2(maxX - spacing, 0);
+            case "team3": return new Vector2(spacing, maxY);
+            case "team4": return new Vector2(maxX - spacing, maxY);
+        }
+
+        // Solo players: distribute across the 4 spawn rooms using hash
+        var hash2 = Math.Abs(teamId.GetHashCode());
+        var spawnPositions = new[]
+        {
+            new Vector2(spacing, 0),
+            new Vector2(maxX - spacing, 0),
+            new Vector2(spacing, maxY),
+            new Vector2(maxX - spacing, maxY)
         };
+        return spawnPositions[hash2 % spawnPositions.Length];
     }
 
     /// <summary>

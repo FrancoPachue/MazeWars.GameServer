@@ -4,6 +4,7 @@ using MazeWars.GameServer.Models;
 
 namespace MazeWars.GameServer.Engine.Items;
 
+// NOTE: Key/lockpick/rope usage is handled by LootSystem.UseItem, not this class
 public class WorldInteractionSystem : IWorldInteractionSystem
 {
     private readonly ILogger<WorldInteractionSystem> _logger;
@@ -40,8 +41,8 @@ public class WorldInteractionSystem : IWorldInteractionSystem
         _logger.LogInformation("Player {PlayerName} unlocked {ObjectType} with {KeyName}",
             player.PlayerName, compatibleObject.ObjectType, key.ItemName);
 
-        // Key might be consumed depending on type
-        var keyConsumed = key.ItemName.ToLower() != "master key";
+        // All keys are consumed on use (including master key)
+        var keyConsumed = true;
 
         return UseItemResult.Ok(
             $"Unlocked {compatibleObject.ObjectType}",

@@ -40,6 +40,13 @@ public class GameBalance
     public float CorruptionWarningSeconds { get; set; } = 30f;
     public int CorruptionDamageBase { get; set; } = 5;
     public float CorruptionDamageScale { get; set; } = 2f;
+    public float CorruptionFinalCollapseDelaySeconds { get; set; } = 60f;
+
+    // ── Extraction Portals ──
+    public int PortalFirstSpawnWave { get; set; } = 3;
+    public int PortalPlayersPerPortal { get; set; } = 3;
+    public int PortalExtractionTimeSeconds { get; set; } = 15;
+    public float PortalCorruptionGraceSeconds { get; set; } = 30f;
 
     // ── Revival ──
     public float RevivalChannelSeconds { get; set; } = 3.0f;

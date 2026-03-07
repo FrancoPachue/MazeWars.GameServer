@@ -3,6 +3,7 @@ using MazeWars.GameServer.Engine.AI.Interface;
 using MazeWars.GameServer.Engine.Combat.Interface;
 using MazeWars.GameServer.Engine.Combat.Models;
 using MazeWars.GameServer.Engine.MobIASystem.Models;
+using MazeWars.GameServer.Engine.Movement.Interface;
 using MazeWars.GameServer.Models;
 using MazeWars.GameServer.Network.Models;
 using MazeWars.GameServer.Services.Combat;
@@ -10,6 +11,7 @@ using MazeWars.GameServer.Utils;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
+using System.Threading;
 
 namespace MazeWars.GameServer.Services.AI;
 
@@ -19,12 +21,13 @@ public class MobAISystem : IMobAISystem
     private readonly GameServerSettings _settings;
     private readonly ProjectileSystem _projectileSystem;
     private readonly ICombatSystem _combatSystem;
+    private readonly IMovementSystem _movementSystem;
     private AISettings _aiSettings;
-    private readonly Random _random;
+    // Removed: _random field — use Random.Shared for thread safety in parallel contexts
 
     // Templates and configuration
-    private readonly Dictionary<string, MobTemplate> _mobTemplates = new();
-    private readonly Dictionary<string, NavigationMesh> _worldNavMeshes = new();
+    private readonly ConcurrentDictionary<string, MobTemplate> _mobTemplates = new();
+    private readonly ConcurrentDictionary<string, NavigationMesh> _worldNavMeshes = new();
 
     // World-specific AI tracking
     private readonly ConcurrentDictionary<string, AIStats> _worldAIStats = new();
@@ -32,18 +35,18 @@ public class MobAISystem : IMobAISystem
     private readonly ConcurrentDictionary<string, Dictionary<string, List<EnhancedMob>>> _mobGroups = new();
 
     // Performance optimization
-    private readonly Dictionary<string, DateTime> _lastUpdateTimes = new();
-    private readonly Dictionary<string, DateTime> _lastDynamicSpawn = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastUpdateTimes = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastDynamicSpawn = new();
     private int _updateCycle = 0;
 
-    // Reusable buffers to reduce GC allocations on hot paths
-    private readonly List<EnhancedMob> _priorityCritical = new();
-    private readonly List<EnhancedMob> _priorityHigh = new();
-    private readonly List<EnhancedMob> _priorityMedium = new();
-    private readonly List<EnhancedMob> _priorityLow = new();
-    private readonly List<EnhancedMob> _tempMobBuffer = new(32);
-    private readonly List<RealTimePlayer> _tempPlayerBuffer = new(16);
-    private readonly List<string> _tempExpiredKeys = new(8);
+    // Reusable buffers to reduce GC allocations on hot paths (ThreadStatic for parallel safety)
+    [ThreadStatic] private static List<EnhancedMob>? t_priorityCritical;
+    [ThreadStatic] private static List<EnhancedMob>? t_priorityHigh;
+    [ThreadStatic] private static List<EnhancedMob>? t_priorityMedium;
+    [ThreadStatic] private static List<EnhancedMob>? t_priorityLow;
+    [ThreadStatic] private static List<EnhancedMob>? t_tempMobBuffer;
+    [ThreadStatic] private static List<RealTimePlayer>? t_tempPlayerBuffer;
+    [ThreadStatic] private static List<string>? t_tempExpiredKeys;
 
     // Events
     public event Action<string, Mob>? OnMobSpawned;
@@ -54,13 +57,14 @@ public class MobAISystem : IMobAISystem
     public event Action<RealTimePlayer, Mob>? OnPlayerKilledByMob;
     public event Action<string, CombatEvent>? OnMobAbilityUsed;
 
-    public MobAISystem(ILogger<MobAISystem> logger, IOptions<GameServerSettings> settings, ProjectileSystem projectileSystem, ICombatSystem combatSystem)
+    public MobAISystem(ILogger<MobAISystem> logger, IOptions<GameServerSettings> settings, ProjectileSystem projectileSystem, ICombatSystem combatSystem, IMovementSystem movementSystem)
     {
         _logger = logger;
         _settings = settings.Value;
         _projectileSystem = projectileSystem;
         _combatSystem = combatSystem;
-        _random = new Random();
+        _movementSystem = movementSystem;
+        // Random.Shared is used directly for thread safety
 
         // Initialize AI settings
         _aiSettings = new AISettings
@@ -173,7 +177,7 @@ public class MobAISystem : IMobAISystem
             PatrolTarget = position + GenerateRandomOffset(template.BehaviorSettings.PatrolRadius),
             RoomId = roomId,
             Template = template,
-            EnhancedStats = CalculateMobStats(mobType, world, world.Rooms[roomId]),
+            EnhancedStats = CalculateMobStats(mobType, world, world.Rooms.TryGetValue(roomId, out var spawnRoom) ? spawnRoom : null!),
             CurrentState = MobState.Spawning,
             StateChangedAt = DateTime.UtcNow,
             AggressionLevel = template.BehaviorSettings.AggressionLevel * _aiSettings.GlobalAggressionMultiplier,
@@ -203,7 +207,7 @@ public class MobAISystem : IMobAISystem
         OnMobSpawned?.Invoke(world.WorldId, enhancedMob);
 
         // Check if this should be a boss
-        if (template.IsBoss || (_random.NextDouble() < _aiSettings.BossSpawnChance && mobType == "elite"))
+        if (template.IsBoss || (Random.Shared.NextDouble() < _aiSettings.BossSpawnChance && mobType == "elite"))
         {
             ConvertToBoss(enhancedMob);
             OnBossSpawned?.Invoke(world.WorldId, enhancedMob);
@@ -224,7 +228,7 @@ public class MobAISystem : IMobAISystem
             return;
 
         var stats = GetOrCreateWorldStats(world.WorldId);
-        _updateCycle++;
+        Interlocked.Increment(ref _updateCycle);
 
         // Update spatial partitioning and mob activation based on player proximity
         if (_aiSettings.EnablePerformanceOptimization)
@@ -404,11 +408,29 @@ public class MobAISystem : IMobAISystem
 
         // Calculate damage
         var baseDamage = enhancedMob.EnhancedStats.Damage;
-        bool isCrit = _random.NextDouble() < enhancedMob.EnhancedStats.CriticalChance;
+        bool isCrit = Random.Shared.NextDouble() < enhancedMob.EnhancedStats.CriticalChance;
         var finalDamage = CalculateFinalDamage(enhancedMob, target, baseDamage, isCrit);
 
-        // Apply damage
-        target.Health = Math.Max(0, target.Health - finalDamage);
+        // Re-check target is alive (defense-in-depth against TOCTOU)
+        if (!target.IsAlive) return result;
+
+        // Apply damage with shield absorption
+        var remainingDamage = finalDamage;
+        if (target.Shield > 0)
+        {
+            var absorbed = Math.Min(target.Shield, remainingDamage);
+            target.Shield -= absorbed;
+            remainingDamage -= absorbed;
+            if (target.Shield <= 0)
+            {
+                lock (target.StatusEffectsLock)
+                {
+                    target.StatusEffects.RemoveAll(e => e.EffectType == "shield");
+                }
+                target.DamageReduction = target.EquipmentDamageReduction;
+            }
+        }
+        target.Health = Math.Max(0, target.Health - remainingDamage);
         target.LastDamageTime = DateTime.UtcNow;
 
         // Update mob state
@@ -631,6 +653,10 @@ public class MobAISystem : IMobAISystem
         var roomsNeedingMobs = new List<Room>();
         foreach (var r in world.Rooms.Values)
         {
+            // Skip completed boss/elite rooms to prevent infinite respawns
+            if ((r.RoomType == "boss_arena" || r.RoomType == "elite_chamber") && r.IsCompleted)
+                continue;
+
             if (!IsExtractionRoom(r.RoomId, world) && !IsSpawnRoom(r) &&
                 GetMobCountInRoom(world, r.RoomId) < _aiSettings.MaxMobsPerRoom / 2)
                 roomsNeedingMobs.Add(r);
@@ -638,7 +664,7 @@ public class MobAISystem : IMobAISystem
 
         if (roomsNeedingMobs.Count > 0)
         {
-            var room = roomsNeedingMobs[_random.Next(roomsNeedingMobs.Count)];
+            var room = roomsNeedingMobs[Random.Shared.Next(roomsNeedingMobs.Count)];
 
             // If the room should have a guaranteed mob type and is missing it, respawn that type
             string mobType;
@@ -765,7 +791,8 @@ public class MobAISystem : IMobAISystem
         {
             if (mob.Template != null)
             {
-                var scaledStats = CalculateMobStats(mob.MobType, world, world.Rooms[mob.RoomId]);
+                if (!world.Rooms.TryGetValue(mob.RoomId, out var scalingRoom)) continue;
+                var scaledStats = CalculateMobStats(mob.MobType, world, scalingRoom);
                 mob.EnhancedStats = scaledStats;
 
                 // Apply scaling to current health proportionally
@@ -920,10 +947,15 @@ public class MobAISystem : IMobAISystem
             return;
 
         // Bucket mobs by priority (avoids GroupBy/OrderBy/ToList allocations)
-        _priorityCritical.Clear();
-        _priorityHigh.Clear();
-        _priorityMedium.Clear();
-        _priorityLow.Clear();
+        var priorityCritical = t_priorityCritical ??= new List<EnhancedMob>();
+        var priorityHigh = t_priorityHigh ??= new List<EnhancedMob>();
+        var priorityMedium = t_priorityMedium ??= new List<EnhancedMob>();
+        var priorityLow = t_priorityLow ??= new List<EnhancedMob>();
+
+        priorityCritical.Clear();
+        priorityHigh.Clear();
+        priorityMedium.Clear();
+        priorityLow.Clear();
 
         for (int i = 0; i < mobs.Count; i++)
         {
@@ -932,18 +964,18 @@ public class MobAISystem : IMobAISystem
 
             switch (mob.ProcessingPriority)
             {
-                case AIProcessingPriority.Critical: _priorityCritical.Add(mob); break;
-                case AIProcessingPriority.High: _priorityHigh.Add(mob); break;
-                case AIProcessingPriority.Medium: _priorityMedium.Add(mob); break;
-                case AIProcessingPriority.Low: _priorityLow.Add(mob); break;
+                case AIProcessingPriority.Critical: priorityCritical.Add(mob); break;
+                case AIProcessingPriority.High: priorityHigh.Add(mob); break;
+                case AIProcessingPriority.Medium: priorityMedium.Add(mob); break;
+                case AIProcessingPriority.Low: priorityLow.Add(mob); break;
             }
         }
 
         // Process highest priority first, respecting budget
-        ProcessPriorityBucket(_priorityCritical, AIProcessingPriority.Critical, world, deltaTime);
-        ProcessPriorityBucket(_priorityHigh, AIProcessingPriority.High, world, deltaTime);
-        ProcessPriorityBucket(_priorityMedium, AIProcessingPriority.Medium, world, deltaTime);
-        ProcessPriorityBucket(_priorityLow, AIProcessingPriority.Low, world, deltaTime);
+        ProcessPriorityBucket(priorityCritical, AIProcessingPriority.Critical, world, deltaTime);
+        ProcessPriorityBucket(priorityHigh, AIProcessingPriority.High, world, deltaTime);
+        ProcessPriorityBucket(priorityMedium, AIProcessingPriority.Medium, world, deltaTime);
+        ProcessPriorityBucket(priorityLow, AIProcessingPriority.Low, world, deltaTime);
     }
 
     private void ProcessPriorityBucket(List<EnhancedMob> bucket, AIProcessingPriority priority, GameWorld world, float deltaTime)
@@ -965,9 +997,9 @@ public class MobAISystem : IMobAISystem
         _worldMobs.TryRemove(worldId, out _);
         _mobGroups.TryRemove(worldId, out _);
         _worldAIStats.TryRemove(worldId, out _);
-        _worldNavMeshes.Remove(worldId);
-        _lastUpdateTimes.Remove(worldId);
-        _lastDynamicSpawn.Remove(worldId);
+        _worldNavMeshes.TryRemove(worldId, out _);
+        _lastUpdateTimes.TryRemove(worldId, out _);
+        _lastDynamicSpawn.TryRemove(worldId, out _);
 
         _logger.LogInformation("Cleaned up AI data for world {WorldId}", worldId);
     }
@@ -977,17 +1009,18 @@ public class MobAISystem : IMobAISystem
         if (!_worldMobs.TryGetValue(world.WorldId, out var mobs))
             return;
 
-        _tempMobBuffer.Clear();
+        var tempMobBuffer = t_tempMobBuffer ??= new List<EnhancedMob>(32);
+        tempMobBuffer.Clear();
         for (int i = 0; i < mobs.Count; i++)
         {
             var mob = mobs[i];
             if (mob.Health <= 0 && (DateTime.UtcNow - mob.StateChangedAt).TotalMinutes > 5)
-                _tempMobBuffer.Add(mob);
+                tempMobBuffer.Add(mob);
         }
 
-        for (int i = 0; i < _tempMobBuffer.Count; i++)
+        for (int i = 0; i < tempMobBuffer.Count; i++)
         {
-            var mob = _tempMobBuffer[i];
+            var mob = tempMobBuffer[i];
             mobs.Remove(mob);
             world.Mobs.TryRemove(mob.MobId, out _);
 
@@ -997,15 +1030,17 @@ public class MobAISystem : IMobAISystem
             }
         }
 
-        if (_tempMobBuffer.Count > 0)
+        if (tempMobBuffer.Count > 0)
         {
             _logger.LogDebug("Cleaned up {Count} invalid mobs from world {WorldId}",
-                _tempMobBuffer.Count, world.WorldId);
+                tempMobBuffer.Count, world.WorldId);
         }
     }
 
     public void OptimizeMemoryUsage()
     {
+        var tempExpiredKeys = t_tempExpiredKeys ??= new List<string>(8);
+
         foreach (var (worldId, mobs) in _worldMobs)
         {
             // Clean up old tracking data
@@ -1029,14 +1064,14 @@ public class MobAISystem : IMobAISystem
                 foreach (var kvp in mob.AbilityCooldowns)
                 {
                     if ((DateTime.UtcNow - kvp.Value).TotalMinutes > 10)
-                        _tempExpiredKeys.Add(kvp.Key);
+                        tempExpiredKeys.Add(kvp.Key);
                 }
 
-                foreach (var key in _tempExpiredKeys)
+                foreach (var key in tempExpiredKeys)
                 {
                     mob.AbilityCooldowns.Remove(key);
                 }
-                _tempExpiredKeys.Clear();
+                tempExpiredKeys.Clear();
             }
         }
 
@@ -1416,20 +1451,20 @@ public class MobAISystem : IMobAISystem
         return room.RoomType switch
         {
             "empty" or "spawn" => 0,
-            "patrol" => _random.Next(2, 4),           // 2-3
-            "guard_post" => _random.Next(3, 5),        // 3-4
-            "ambush" => _random.Next(4, 7),            // 4-6
-            "elite_chamber" => _random.Next(3, 6),     // 3-5
-            "boss_arena" => _random.Next(3, 5),        // 3-4 (boss + guards)
-            "treasure_vault" => _random.Next(3, 5),    // 3-4
-            _ => _random.Next(2, 4)
+            "patrol" => Random.Shared.Next(2, 4),           // 2-3
+            "guard_post" => Random.Shared.Next(3, 5),        // 3-4
+            "ambush" => Random.Shared.Next(4, 7),            // 4-6
+            "elite_chamber" => Random.Shared.Next(3, 6),     // 3-5
+            "boss_arena" => Random.Shared.Next(3, 5),        // 3-4 (boss + guards)
+            "treasure_vault" => Random.Shared.Next(3, 5),    // 3-4
+            _ => Random.Shared.Next(2, 4)
         };
     }
 
     private string SelectMobTypeForRoom(Room room, GameWorld world)
     {
         // Room type determines mob composition (boss/elite guaranteed as mob[0] in SpawnInitialMobs)
-        var roll = _random.NextDouble();
+        var roll = Random.Shared.NextDouble();
         return room.RoomType switch
         {
             "patrol" => roll < 0.45 ? "patrol" : roll < 0.75 ? "archer" : "caster",
@@ -1445,15 +1480,15 @@ public class MobAISystem : IMobAISystem
     private Vector2 CalculateSpawnPosition(Room room)
     {
         var margin = 10.0f;
-        var x = room.Position.X + _random.Next((int)-room.Size.X / 2 + (int)margin, (int)room.Size.X / 2 - (int)margin);
-        var y = room.Position.Y + _random.Next((int)-room.Size.Y / 2 + (int)margin, (int)room.Size.Y / 2 - (int)margin);
+        var x = room.Position.X + Random.Shared.Next((int)-room.Size.X / 2 + (int)margin, (int)room.Size.X / 2 - (int)margin);
+        var y = room.Position.Y + Random.Shared.Next((int)-room.Size.Y / 2 + (int)margin, (int)room.Size.Y / 2 - (int)margin);
         return new Vector2(x, y);
     }
 
     private Vector2 GenerateRandomOffset(float radius)
     {
-        var angle = _random.NextDouble() * Math.PI * 2;
-        var distance = _random.NextDouble() * radius;
+        var angle = Random.Shared.NextDouble() * Math.PI * 2;
+        var distance = Random.Shared.NextDouble() * radius;
         return new Vector2(
             (float)(Math.Cos(angle) * distance),
             (float)(Math.Sin(angle) * distance)
@@ -1482,7 +1517,9 @@ public class MobAISystem : IMobAISystem
             }
 
             navMesh.RoomNodes[room.RoomId] = nodes;
-            navMesh.RoomConnections[room.RoomId] = room.Connections.Select(c => world.Rooms[c].Position).ToList();
+            navMesh.RoomConnections[room.RoomId] = room.Connections
+                .Where(c => world.Rooms.ContainsKey(c))
+                .Select(c => world.Rooms[c].Position).ToList();
         }
 
         _worldNavMeshes[world.WorldId] = navMesh;
@@ -1630,7 +1667,7 @@ public class MobAISystem : IMobAISystem
             World = world,
             NearbyPlayers = nearbyPlayers,
             NearbyMobs = nearbyMobs,
-            CurrentRoom = world.Rooms[mob.RoomId],
+            CurrentRoom = world.Rooms.TryGetValue(mob.RoomId, out var mobRoom) ? mobRoom : null!,
             DeltaTime = deltaTime,
             ContextData = new Dictionary<string, object>
             {
@@ -1783,19 +1820,19 @@ public class MobAISystem : IMobAISystem
         return decisions;
     }
 
-    private const float LeashDistance = 50f; // Max distance from spawn before returning
+    private const float LeashDistance = 18f; // Max distance from spawn before returning (~1 room)
 
     private List<AIDecision> GeneratePursuitDecisions(AIDecisionContext context)
     {
         var decisions = new List<AIDecision>();
         var mob = context.Mob as EnhancedMob;
 
-        // Leash check: if mob is too far from spawn, return home and reset
+        // Leash check: if mob is too far from spawn, return home (full heal on arrival, not gradual)
         var distFromSpawn = Vector2.Distance(mob.Position, mob.OriginalPosition);
         if (distFromSpawn > LeashDistance)
         {
             mob.TargetPlayerId = null;
-            mob.Health = mob.MaxHealth; // Heal to full on leash reset
+            mob.LastKnownPlayerPosition = mob.OriginalPosition;
             mob.IsDirty = true;
             decisions.Add(new AIDecision
             {
@@ -1805,6 +1842,13 @@ public class MobAISystem : IMobAISystem
                 Reason = "Leashing back to spawn"
             });
             return decisions;
+        }
+
+        // Full heal when mob arrives back at spawn after leashing
+        if (string.IsNullOrEmpty(mob.TargetPlayerId) && distFromSpawn < 2.0f && mob.Health < mob.MaxHealth)
+        {
+            mob.Health = mob.MaxHealth;
+            mob.IsDirty = true;
         }
 
         if (!string.IsNullOrEmpty(mob.TargetPlayerId))
@@ -1883,12 +1927,12 @@ public class MobAISystem : IMobAISystem
         var decisions = new List<AIDecision>();
         var mob = context.Mob as EnhancedMob;
 
-        // Leash check: if too far from spawn, drop target and return
+        // Leash check: if too far from spawn, drop target and return (full heal on arrival)
         var distFromSpawn = Vector2.Distance(mob.Position, mob.OriginalPosition);
         if (distFromSpawn > LeashDistance)
         {
             mob.TargetPlayerId = null;
-            mob.Health = mob.MaxHealth;
+            mob.LastKnownPlayerPosition = mob.OriginalPosition;
             mob.IsDirty = true;
             decisions.Add(new AIDecision
             {
@@ -1898,6 +1942,13 @@ public class MobAISystem : IMobAISystem
                 Reason = "Leashing back to spawn"
             });
             return decisions;
+        }
+
+        // Full heal when mob arrives back at spawn after leashing
+        if (string.IsNullOrEmpty(mob.TargetPlayerId) && distFromSpawn < 2.0f && mob.Health < mob.MaxHealth)
+        {
+            mob.Health = mob.MaxHealth;
+            mob.IsDirty = true;
         }
 
         if (!string.IsNullOrEmpty(mob.TargetPlayerId))
@@ -2322,10 +2373,26 @@ public class MobAISystem : IMobAISystem
 
                 // Instant ranged damage (no projectile — archers use hitscan)
                 var baseDamage = mob.EnhancedStats.Damage;
-                bool isCrit = _random.NextDouble() < mob.EnhancedStats.CriticalChance;
+                bool isCrit = Random.Shared.NextDouble() < mob.EnhancedStats.CriticalChance;
                 var finalDamage = CalculateFinalDamage(mob, target, baseDamage, isCrit);
 
-                target.Health = Math.Max(0, target.Health - finalDamage);
+                // Shield absorption for ranged attack
+                var remainingDamage = finalDamage;
+                if (target.Shield > 0)
+                {
+                    var absorbed = Math.Min(target.Shield, remainingDamage);
+                    target.Shield -= absorbed;
+                    remainingDamage -= absorbed;
+                    if (target.Shield <= 0)
+                    {
+                        lock (target.StatusEffectsLock)
+                        {
+                            target.StatusEffects.RemoveAll(e => e.EffectType == "shield");
+                        }
+                        target.DamageReduction = target.EquipmentDamageReduction;
+                    }
+                }
+                target.Health = Math.Max(0, target.Health - remainingDamage);
                 target.LastDamageTime = DateTime.UtcNow;
                 mob.LastAttackTime = DateTime.UtcNow;
                 mob.AttacksPerformed++;
@@ -2544,19 +2611,22 @@ public class MobAISystem : IMobAISystem
         var healthPct = (float)boss.Health / boss.MaxHealth;
         var phase = GetBossPhase(healthPct);
 
-        // Apply phase-based stat modifiers
-        boss.BossPhase = phase;
-        boss.IsDirty = true;
-        if (phase >= 3)
+        // Apply phase-based stat modifiers only when phase transitions (not every frame)
+        if (phase != boss.BossPhase)
         {
-            // Enrage: damage +50%, speed +30%
-            boss.EnhancedStats.Damage = (int)(boss.Template?.BaseStats.Damage * 1.5f ?? boss.EnhancedStats.Damage);
-            boss.EnhancedStats.Speed = (boss.Template?.BaseStats.Speed ?? 3f) * 1.3f;
-        }
-        else if (phase >= 2)
-        {
-            // Phase 2: faster cooldowns
-            boss.EnhancedStats.Damage = (int)(boss.Template?.BaseStats.Damage * 1.2f ?? boss.EnhancedStats.Damage);
+            boss.BossPhase = phase;
+            boss.IsDirty = true;
+            if (phase >= 3)
+            {
+                // Enrage: damage +50%, speed +30%
+                boss.EnhancedStats.Damage = (int)(boss.Template?.BaseStats.Damage * 1.5f ?? boss.EnhancedStats.Damage);
+                boss.EnhancedStats.Speed = (boss.Template?.BaseStats.Speed ?? 3f) * 1.3f;
+            }
+            else if (phase >= 2)
+            {
+                // Phase 2: damage +20%
+                boss.EnhancedStats.Damage = (int)(boss.Template?.BaseStats.Damage * 1.2f ?? boss.EnhancedStats.Damage);
+            }
         }
 
         // If boss is casting (telegraph in progress), check if duration elapsed
@@ -2727,10 +2797,26 @@ public class MobAISystem : IMobAISystem
                     if (Vector2.Distance(mob.Position, target.Position) <= mob.EnhancedStats.AttackRange * 1.5f)
                     {
                         var baseDamage = (int)(mob.EnhancedStats.Damage * 1.5f);
-                        bool isCrit = _random.NextDouble() < mob.EnhancedStats.CriticalChance;
+                        bool isCrit = Random.Shared.NextDouble() < mob.EnhancedStats.CriticalChance;
                         var finalDamage = CalculateFinalDamage(mob, target, baseDamage, isCrit);
 
-                        target.Health = Math.Max(0, target.Health - finalDamage);
+                        // Shield absorption for charge attack
+                        var remainingDamage = finalDamage;
+                        if (target.Shield > 0)
+                        {
+                            var absorbed = Math.Min(target.Shield, remainingDamage);
+                            target.Shield -= absorbed;
+                            remainingDamage -= absorbed;
+                            if (target.Shield <= 0)
+                            {
+                                lock (target.StatusEffectsLock)
+                                {
+                                    target.StatusEffects.RemoveAll(e => e.EffectType == "shield");
+                                }
+                                target.DamageReduction = target.EquipmentDamageReduction;
+                            }
+                        }
+                        target.Health = Math.Max(0, target.Health - remainingDamage);
                         target.LastDamageTime = DateTime.UtcNow;
                         result.Damage = finalDamage;
                         result.AffectedPlayers.Add(target);
@@ -2863,7 +2949,18 @@ public class MobAISystem : IMobAISystem
             if (player.Health <= 0 && player.IsAlive)
             {
                 player.IsAlive = false;
+                player.Health = 0;
                 player.DeathTime = DateTime.UtcNow;
+                player.ForceNextUpdate();
+
+                // Drop soul if carrying one (matches CombatSystem.ProcessPlayerDeath)
+                if (player.CarryingSoulOfPlayerId != null)
+                {
+                    _logger.LogInformation("Player {PlayerName} died (mob AOE) while carrying soul of {SoulId}",
+                        player.PlayerName, player.CarryingSoulOfPlayerId);
+                    player.CarryingSoulOfPlayerId = null;
+                }
+
                 var stats = GetOrCreateWorldStats(world.WorldId);
                 stats.PlayerKills++;
                 OnPlayerKilledByMob?.Invoke(player, mob);
@@ -3004,18 +3101,7 @@ public class MobAISystem : IMobAISystem
 
     private bool IsValidPosition(Vector2 position, GameWorld world)
     {
-        // Simple bounds checking - can be enhanced with collision detection
-        foreach (var room in world.Rooms.Values)
-        {
-            if (position.X >= room.Position.X - room.Size.X / 2 &&
-                position.X <= room.Position.X + room.Size.X / 2 &&
-                position.Y >= room.Position.Y - room.Size.Y / 2 &&
-                position.Y <= room.Position.Y + room.Size.Y / 2)
-            {
-                return true;
-            }
-        }
-        return false;
+        return _movementSystem.IsValidPosition(world, position);
     }
 
     private int GetMobCountInRoom(GameWorld world, string roomId)
@@ -3053,8 +3139,8 @@ public class MobAISystem : IMobAISystem
             damage = (int)(damage * 1.5f);
         }
 
-        // Apply target armor (if implemented)
-        // damage = Math.Max(1, damage - target.Armor);
+        // Apply target's damage reduction from equipment
+        damage = (int)(damage * (1f - Math.Clamp(target.DamageReduction, 0f, 0.90f)));
 
         return Math.Max(1, damage);
     }

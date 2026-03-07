@@ -14,6 +14,8 @@ public class StashService
 
     // In-memory cache for fast access during gameplay
     private readonly ConcurrentDictionary<string, List<LootItem>> _stashes = new();
+    // Per-player save locks to prevent concurrent PersistStash calls
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _saveLocks = new();
     private readonly IPlayerRepository _playerRepository;
     private readonly ILogger<StashService> _logger;
 
@@ -51,9 +53,13 @@ public class StashService
 
         lock (stash)
         {
+            // Build set of existing LootIds for deduplication
+            var existingIds = new HashSet<string>(stash.Select(i => i.LootId));
+
             foreach (var item in items)
             {
                 if (stash.Count >= MaxStashSize) break;
+                if (existingIds.Contains(item.LootId)) continue; // Skip duplicates
 
                 var stashedItem = new LootItem
                 {
@@ -63,14 +69,17 @@ public class StashService
                     Rarity = item.Rarity,
                     Properties = new Dictionary<string, object>(item.Properties),
                     Stats = new Dictionary<string, int>(item.Stats),
-                    Value = item.Value
+                    Value = item.Value,
+                    StackCount = item.StackCount,
+                    Weight = item.Weight
                 };
                 stash.Add(stashedItem);
+                existingIds.Add(item.LootId);
                 added++;
             }
         }
 
-        // Persist to DB asynchronously (fire-and-forget with error logging)
+        // Persist to DB (serialized per-player to prevent concurrent save races)
         _ = PersistStash(playerName);
 
         return added;
@@ -124,8 +133,13 @@ public class StashService
         }
     }
 
+    /// <summary>
+    /// Persist stash to DB with per-player serialization (prevents concurrent save races).
+    /// </summary>
     private async Task PersistStash(string playerName)
     {
+        var semaphore = _saveLocks.GetOrAdd(playerName, _ => new SemaphoreSlim(1, 1));
+        await semaphore.WaitAsync();
         try
         {
             var items = GetStash(playerName);
@@ -134,6 +148,10 @@ public class StashService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to persist stash to DB for {Player}", playerName);
+        }
+        finally
+        {
+            semaphore.Release();
         }
     }
 }

@@ -16,7 +16,7 @@ public class WorldUpdateMessage
 
     // Frame counter
     [Key(2)]
-    public int FrameNumber { get; set; }
+    public ulong FrameNumber { get; set; }
 
     // Game state updates
     [Key(3)]

@@ -49,27 +49,28 @@ public class LobbyManager
     /// <summary>
     /// Find an available lobby for a team or create a new one, filtered by game mode.
     /// </summary>
-    public string FindOrCreateLobby(string teamId, string gameMode = "trios")
+    public string FindOrCreateLobby(string teamId, string gameMode = "trios", string difficultyTier = "normal")
     {
         var modeConfig = _settings.GameModes.GetValueOrDefault(gameMode);
 
         lock (_lobbiesLock)
         {
-            // Try to find an available lobby matching the game mode
+            // Try to find an available lobby matching the game mode AND difficulty
             foreach (var lobby in _worldLobbies.Values.Where(l =>
-                l.Status == LobbyStatus.WaitingForPlayers && l.GameMode == gameMode))
+                l.Status == LobbyStatus.WaitingForPlayers && l.GameMode == gameMode && l.DifficultyTier == difficultyTier))
             {
                 if (CanJoinLobby(lobby, teamId, modeConfig))
                 {
-                    _logger.LogInformation("Found available lobby {LobbyId} for team {TeamId} (mode: {GameMode})",
-                        lobby.LobbyId, teamId, gameMode);
+                    _logger.LogInformation("Found available lobby {LobbyId} for team {TeamId} (mode: {GameMode}, difficulty: {Difficulty})",
+                        lobby.LobbyId, teamId, gameMode, difficultyTier);
                     return lobby.LobbyId;
                 }
             }
 
             // Create new lobby if none available
             var newLobbyId = CreateNewLobby(gameMode, modeConfig);
-            _logger.LogInformation("Created new lobby {LobbyId} for team {TeamId} (mode: {GameMode})", newLobbyId, teamId, gameMode);
+            _worldLobbies[newLobbyId].DifficultyTier = difficultyTier;
+            _logger.LogInformation("Created new lobby {LobbyId} for team {TeamId} (mode: {GameMode}, difficulty: {Difficulty})", newLobbyId, teamId, gameMode, difficultyTier);
             return newLobbyId;
         }
     }
@@ -94,9 +95,13 @@ public class LobbyManager
             return false;
 
         // Prevent new teams from joining if other teams are already at max size
-        var currentMaxTeamSize = lobby.TeamPlayerCounts.Values.DefaultIfEmpty(0).Max();
-        if (teamCount == 0 && currentMaxTeamSize >= maxTeamSizeAllowed)
-            return false;
+        // Skip for solo modes (MaxTeamSize=1) where every player is their own team
+        if (maxTeamSizeAllowed > 1)
+        {
+            var currentMaxTeamSize = lobby.TeamPlayerCounts.Values.DefaultIfEmpty(0).Max();
+            if (teamCount == 0 && currentMaxTeamSize >= maxTeamSizeAllowed)
+                return false;
+        }
 
         return true;
     }
@@ -302,6 +307,15 @@ public class LobbyManager
         if (lobby.Status != LobbyStatus.WaitingForPlayers)
             return;
 
+        // RULE 0: Arena mode starts immediately once 2 players have joined (no wait timer)
+        if (lobby.GameMode == "arena" && lobby.TotalPlayers >= 2)
+        {
+            _logger.LogInformation("Starting arena lobby {LobbyId} immediately ({Players} players)",
+                lobby.LobbyId, lobby.TotalPlayers);
+            RequestLobbyStart(lobby);
+            return;
+        }
+
         // RULE 1: Start immediately if lobby is full
         if (lobby.TotalPlayers >= lobby.MaxPlayers)
         {
@@ -358,6 +372,10 @@ public class LobbyManager
     /// </summary>
     private bool ShouldStartLobby(WorldLobby lobby)
     {
+        // Arena requires at least 2 players, never auto-start with 1
+        if (lobby.GameMode == "arena" && lobby.TotalPlayers < 2)
+            return false;
+
         if (lobby.TotalPlayers >= lobby.MinPlayersToStart)
         {
             var timeSinceCreated = DateTime.UtcNow - lobby.CreatedAt;

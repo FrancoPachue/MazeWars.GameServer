@@ -5,6 +5,10 @@ using MazeWars.GameServer.Engine.Equipment.Data;
 using MazeWars.GameServer.Engine.Equipment.Interface;
 using MazeWars.GameServer.Engine.Equipment.Models;
 using MazeWars.GameServer.Engine.Network;
+using MazeWars.GameServer.Engine.Stash;
+using MazeWars.GameServer.Engine.Vendor;
+using MazeWars.GameServer.Engine.Challenges;
+using MazeWars.GameServer.Data.Repositories;
 using MazeWars.GameServer.Models;
 using MazeWars.GameServer.Network.Models;
 using MazeWars.GameServer.Security;
@@ -42,15 +46,18 @@ public class UdpNetworkService : IDisposable
     private readonly Timer _reliabilityTimer;
     private readonly Timer _sessionCleanupTimer;
 
+    // Per-name connection locks to prevent TOCTOU race in duplicate name check
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _connectLocks = new();
+
     // State tracking
     private volatile bool _isRunning = false;
-    private int _packetsSent = 0;
-    private int _packetsReceived = 0;
+    private long _packetsSent = 0;
+    private long _packetsReceived = 0;
 
     // Performance settings
     private readonly int _worldUpdateRate = 10;
     private const int MAX_UDP_PAYLOAD = 1400; // Safe UDP packet size (under MTU)
-    private int _worldUpdateCounter = 0;
+    private long _worldUpdateCounter = 0;
     private const int SocketReceiveTimeout = 5000;
 
     // Reentrancy guards for timer callbacks
@@ -61,6 +68,10 @@ public class UdpNetworkService : IDisposable
     private uint _pingCounter = 0;
 
     private readonly IEquipmentSystem _equipmentSystem;
+    private readonly IPlayerRepository _playerRepository;
+    private readonly StashService _stashService;
+    private readonly VendorService _vendorService;
+    private readonly ChallengeService _challengeService;
 
     public UdpNetworkService(
         ILogger<UdpNetworkService> logger,
@@ -68,7 +79,11 @@ public class UdpNetworkService : IDisposable
         RealTimeGameEngine gameEngine,
         RateLimitingService rateLimitingService,
         SessionManager sessionManager,
-        IEquipmentSystem equipmentSystem)
+        IEquipmentSystem equipmentSystem,
+        IPlayerRepository playerRepository,
+        StashService stashService,
+        VendorService vendorService,
+        ChallengeService challengeService)
     {
         _logger = logger;
         _settings = settings.Value;
@@ -76,6 +91,10 @@ public class UdpNetworkService : IDisposable
         _rateLimitingService = rateLimitingService;
         _sessionManager = sessionManager;
         _equipmentSystem = equipmentSystem;
+        _playerRepository = playerRepository;
+        _stashService = stashService;
+        _vendorService = vendorService;
+        _challengeService = challengeService;
 
         // Timer para enviar updates using configured rate
         var sendIntervalMs = 1000.0 / Math.Max(1, _settings.NetworkSettings.PlayerUpdateRate);
@@ -208,11 +227,8 @@ public class UdpNetworkService : IDisposable
             }
             catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset)
             {
-                // Error 10054 - Cliente desconectado abruptamente
-                _logger.LogDebug("🔌 Client disconnected abruptly (ConnectionReset), continuing to listen...");
-
-                // NO hacer break aquí, continuar escuchando para otros clientes
-                await Task.Delay(100); // Pequeña pausa para evitar spam
+                // Error 10054 - Client disconnected abruptly; normal for UDP, continue immediately
+                _logger.LogDebug("Client disconnected abruptly (ConnectionReset), continuing to listen...");
                 continue;
             }
             catch (SocketException ex) when (ex.SocketErrorCode == SocketError.Interrupted)
@@ -318,14 +334,20 @@ public class UdpNetworkService : IDisposable
                     "MessagePack deserialization failed from {EndPoint}. Size: {Size} bytes",
                     clientEndPoint, messageData.Length);
 
-                await SendErrorToClient(clientEndPoint, "Invalid message format");
+                if (_connectedClients.ContainsKey(clientEndPoint))
+                {
+                    await SendErrorToClient(clientEndPoint, "Invalid message format");
+                }
                 return;
             }
 
             if (networkMessage == null)
             {
                 _logger.LogWarning("Failed to deserialize message from {EndPoint}", clientEndPoint);
-                await SendErrorToClient(clientEndPoint, "Invalid message format");
+                if (_connectedClients.ContainsKey(clientEndPoint))
+                {
+                    await SendErrorToClient(clientEndPoint, "Invalid message format");
+                }
                 return;
             }
 
@@ -335,12 +357,31 @@ public class UdpNetworkService : IDisposable
             // Update client activity
             UpdateClientActivity(clientEndPoint, networkMessage.PlayerId);
 
-            // Additional rate limiting per message type
-            if (!_rateLimitingService.IsAllowed(clientEndPoint, networkMessage.Type))
+            // Rate-limit connect/reconnect by IP (port 0) to prevent abuse from unknown endpoints
+            if (networkMessage.Type == "connect" || networkMessage.Type == "reconnect")
             {
-                _logger.LogWarning("Rate limit exceeded for message type {Type} from {EndPoint}",
-                    networkMessage.Type, clientEndPoint);
-                return;
+                var ipOnlyEndpoint = new IPEndPoint(clientEndPoint.Address, 0);
+                if (!_rateLimitingService.IsAllowed(ipOnlyEndpoint, networkMessage.Type.ToLower()))
+                {
+                    _logger.LogWarning("Rate limit exceeded for {Type} from IP {IP}",
+                        networkMessage.Type, clientEndPoint.Address);
+                    return;
+                }
+            }
+
+            // Only rate-limit known clients to prevent memory exhaustion from spoofed IPs
+            if (_connectedClients.ContainsKey(clientEndPoint))
+            {
+                if (!_rateLimitingService.IsAllowed(clientEndPoint, networkMessage.Type.ToLower()))
+                {
+                    _logger.LogWarning("Rate limit exceeded for message type {Type} from {EndPoint}",
+                        networkMessage.Type, clientEndPoint);
+                    return;
+                }
+            }
+            else if (networkMessage.Type != "connect" && networkMessage.Type != "reconnect")
+            {
+                return; // Unknown endpoint, non-connect message - ignore
             }
 
             // Route message based on type
@@ -426,6 +467,34 @@ public class UdpNetworkService : IDisposable
                     await HandleEquipFromStash(clientEndPoint, networkMessage);
                     break;
 
+                case "vendor_catalog":
+                    await HandleVendorCatalog(clientEndPoint, networkMessage);
+                    break;
+
+                case "vendor_buy":
+                    await HandleVendorBuy(clientEndPoint, networkMessage);
+                    break;
+
+                case "vendor_sell":
+                    await HandleVendorSell(clientEndPoint, networkMessage);
+                    break;
+
+                case "leaderboard":
+                    await HandleLeaderboard(clientEndPoint, networkMessage);
+                    break;
+
+                case "insure_item":
+                    await HandleInsureItem(clientEndPoint, networkMessage);
+                    break;
+
+                case "challenges":
+                    await HandleChallenges(clientEndPoint, networkMessage);
+                    break;
+
+                case "claim_challenge":
+                    await HandleClaimChallenge(clientEndPoint, networkMessage);
+                    break;
+
                 case "disconnect":
                     await HandleClientDisconnect(clientEndPoint, networkMessage);
                     break;
@@ -433,20 +502,29 @@ public class UdpNetworkService : IDisposable
                 default:
                     _logger.LogWarning("Unknown message type '{Type}' from {EndPoint}",
                         networkMessage.Type, clientEndPoint);
-                    await SendErrorToClient(clientEndPoint, $"Unknown message type: {networkMessage.Type}");
+                    if (_connectedClients.ContainsKey(clientEndPoint))
+                    {
+                        await SendErrorToClient(clientEndPoint, "Invalid message");
+                    }
                     break;
             }
         }
         catch (JsonException ex)
         {
             _logger.LogError(ex, "JSON parsing error from {EndPoint}", clientEndPoint);
-            await SendErrorToClient(clientEndPoint, "Invalid message format");
-            _rateLimitingService.RecordViolation(clientEndPoint, "JSON parse error");
+            if (_connectedClients.ContainsKey(clientEndPoint))
+            {
+                await SendErrorToClient(clientEndPoint, "Invalid message format");
+                _rateLimitingService.RecordViolation(clientEndPoint, "JSON parse error");
+            }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing message from {EndPoint}", clientEndPoint);
-            await SendErrorToClient(clientEndPoint, "Internal server error");
+            if (_connectedClients.ContainsKey(clientEndPoint))
+            {
+                await SendErrorToClient(clientEndPoint, "Internal server error");
+            }
         }
     }
 
@@ -494,7 +572,7 @@ public class UdpNetworkService : IDisposable
                 return;
             }
 
-            // Enhanced validation (mantener validaciones existentes)
+            // Enhanced validation
             if (string.IsNullOrWhiteSpace(connectData.PlayerName) ||
                 connectData.PlayerName.Length > 20 ||
                 connectData.PlayerName.Length < 3)
@@ -503,10 +581,9 @@ public class UdpNetworkService : IDisposable
                 return;
             }
 
-            var validClasses = new[] { "scout", "tank", "support", "assassin", "warlock" };
-            if (!validClasses.Contains(connectData.PlayerClass.ToLower()))
+            if (string.IsNullOrWhiteSpace(connectData.CharacterName))
             {
-                await SendErrorToClient(clientEndPoint, "Invalid player class. Must be: scout, tank, support, assassin, or warlock");
+                await SendErrorToClient(clientEndPoint, "Character name is required");
                 return;
             }
 
@@ -518,9 +595,9 @@ public class UdpNetworkService : IDisposable
                 return;
             }
 
-            // For solos: auto-assign unique team ID
+            // For solos/arena: auto-assign unique team ID
             var teamId = connectData.TeamId;
-            if (gameMode == "solos")
+            if (gameMode is "solos" or "arena")
             {
                 teamId = $"solo_{connectData.PlayerName}";
             }
@@ -532,9 +609,9 @@ public class UdpNetworkService : IDisposable
 
             // Validate team size for mode
             var modeConfig = _settings.GameModes[gameMode];
-            if (gameMode == "solos" && modeConfig.MaxTeamSize == 1)
+            if (gameMode is "solos" or "arena" && modeConfig.MaxTeamSize == 1)
             {
-                // Solo mode: team size is always 1, auto-assigned above
+                // Solo/arena mode: team size is always 1, auto-assigned above
             }
             else if (string.IsNullOrWhiteSpace(connectData.TeamId) || !connectData.TeamId.StartsWith("team"))
             {
@@ -542,71 +619,152 @@ public class UdpNetworkService : IDisposable
                 return;
             }
 
-            // Check for duplicate names
-            if (_connectedClients.Values.Any(c => c.Player.PlayerName.Equals(connectData.PlayerName, StringComparison.OrdinalIgnoreCase)))
+            // Authenticate or register
+            var password = connectData.AuthToken;
+            if (string.IsNullOrWhiteSpace(password))
             {
-                await SendErrorToClient(clientEndPoint, "Player name already in use");
+                await SendErrorToClient(clientEndPoint, "Password is required");
                 return;
             }
 
-            if (_connectedClients.ContainsKey(clientEndPoint))
+            var (authSuccess, authError) = await _playerRepository.AuthenticateOrRegister(connectData.PlayerName, password);
+            if (!authSuccess)
             {
-                await SendErrorToClient(clientEndPoint, "Already connected");
+                await SendErrorToClient(clientEndPoint, authError);
                 return;
             }
 
-            // Create enhanced player (use resolved teamId for solos)
-            connectData.TeamId = teamId;
-            var player = CreateEnhancedPlayer(connectData, clientEndPoint);
-
-            // NUEVO: Usar el sistema de matchmaking con game mode
-            var worldId = _gameEngine.FindOrCreateWorld(teamId, gameMode);
-            if (!_gameEngine.AddPlayerToWorld(worldId, player))
+            // Acquire per-name lock to prevent TOCTOU race on duplicate name check
+            var nameLock = _connectLocks.GetOrAdd(connectData.PlayerName.ToLowerInvariant(), _ => new SemaphoreSlim(1, 1));
+            await nameLock.WaitAsync();
+            try
             {
-                await SendErrorToClient(clientEndPoint, "Failed to join world - server full or lobby unavailable");
-                return;
-            }
-
-            // ⭐ RECONNECTION: Create session for player
-            var isInLobby = IsLobby(worldId);
-            var sessionToken = _sessionManager.CreateSession(player, worldId, isInLobby);
-
-            // Add to connected clients
-            var connectedClient = new ConnectedClient
-            {
-                EndPoint = clientEndPoint,
-                Player = player,
-                WorldId = worldId,
-                LastActivity = DateTime.UtcNow,
-                SessionToken = sessionToken
-            };
-
-            _connectedClients[clientEndPoint] = connectedClient;
-            _playerIdToEndPoint[player.PlayerId] = clientEndPoint;
-
-            _logger.LogInformation("Player '{PlayerName}' ({Class}) connected to world {WorldId} on team {TeamId} [Session: {SessionToken}]",
-                player.PlayerName, player.PlayerClass, worldId, player.TeamId, sessionToken.Length > 8 ? sessionToken[..8] + "..." : sessionToken);
-
-            // NUEVO: Enviar respuesta de conexión con información de lobby/mundo y session token
-            await SendConnectionResponse(clientEndPoint, player, worldId, sessionToken);
-
-            // Send initial equipment state
-            await SendEquipmentUpdate(clientEndPoint, player);
-
-            // Notify other players in the world/lobby
-            BroadcastToWorld(worldId, CreateNetworkMessage("player_joined", player.PlayerId,
-                new PlayerJoinedData
+                // Re-check duplicate name after acquiring lock
+                if (_connectedClients.Values.Any(c => c.Player.PlayerName.Equals(connectData.PlayerName, StringComparison.OrdinalIgnoreCase)))
                 {
-                    PlayerName = player.PlayerName,
-                    PlayerClass = player.PlayerClass,
-                    TeamId = player.TeamId,
-                    IsLobby = IsLobby(worldId)
-                }), excludeEndPoint: clientEndPoint);
+                    await SendErrorToClient(clientEndPoint, "Player name already in use");
+                    return;
+                }
+
+                if (_connectedClients.ContainsKey(clientEndPoint))
+                {
+                    await SendErrorToClient(clientEndPoint, "Already connected");
+                    return;
+                }
+
+                // Look up character to get class
+                var character = await _playerRepository.GetCharacter(connectData.PlayerName, connectData.CharacterName);
+                if (character == null)
+                {
+                    await SendErrorToClient(clientEndPoint, $"Character '{connectData.CharacterName}' not found");
+                    return;
+                }
+
+                // Create enhanced player (use resolved teamId for solos, class from character)
+                connectData.TeamId = teamId;
+                var player = CreateEnhancedPlayer(connectData, character.Class, clientEndPoint);
+                player.CharacterName = connectData.CharacterName;
+
+                // Load account + character data from DB
+                try
+                {
+                    var account = await _playerRepository.GetOrCreatePlayer(connectData.PlayerName);
+                    player.AccountTotalXP = character.TotalExperience;
+                    player.AccountGold = account.Gold;
+                    player.AccountLevel = character.CurrentLevel;
+                    await _stashService.LoadFromDatabase(connectData.PlayerName);
+
+                    // Load saved equipment from DB
+                    var savedEquip = await _playerRepository.LoadEquipment(connectData.PlayerName, connectData.CharacterName);
+                    if (savedEquip.Count > 0)
+                    {
+                        foreach (var (slotName, lootItem) in savedEquip)
+                        {
+                            if (Enum.TryParse<Engine.Equipment.Models.EquipmentSlot>(slotName, out var slot))
+                                player.Equipment[slot] = lootItem;
+                        }
+                        _equipmentSystem.RecalculateEquipmentStats(player);
+                        player.Health = player.MaxHealth;
+                        player.Mana = player.MaxMana;
+                        _logger.LogInformation("Loaded {Count} saved equipment items for {Player}/{Char}",
+                            savedEquip.Count, connectData.PlayerName, connectData.CharacterName);
+                    }
+
+                    // Load backpack items (consumables/potions) into inventory
+                    var backpack = await _playerRepository.LoadBackpack(connectData.PlayerName, connectData.CharacterName);
+                    if (backpack.Count > 0)
+                    {
+                        lock (player.InventoryLock)
+                        {
+                            player.Inventory.AddRange(backpack);
+                        }
+                        _logger.LogInformation("Loaded {Count} backpack items for {Player}/{Char}",
+                            backpack.Count, connectData.PlayerName, connectData.CharacterName);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to load account data for {Player}", connectData.PlayerName);
+                }
+
+                // Validate difficulty tier
+                var difficultyTier = connectData.DifficultyTier?.ToLower() ?? "normal";
+                if (difficultyTier != "normal" && difficultyTier != "hard" && difficultyTier != "nightmare")
+                    difficultyTier = "normal";
+
+                // NUEVO: Usar el sistema de matchmaking con game mode and difficulty
+                var worldId = _gameEngine.FindOrCreateWorld(teamId, gameMode, difficultyTier);
+                if (!_gameEngine.AddPlayerToWorld(worldId, player))
+                {
+                    await SendErrorToClient(clientEndPoint, "Failed to join world - server full or lobby unavailable");
+                    return;
+                }
+
+                // ⭐ RECONNECTION: Create session for player
+                var isInLobby = IsLobby(worldId);
+                var sessionToken = _sessionManager.CreateSession(player, worldId, isInLobby);
+
+                // Add to connected clients
+                var connectedClient = new ConnectedClient
+                {
+                    EndPoint = clientEndPoint,
+                    Player = player,
+                    WorldId = worldId,
+                    LastActivity = DateTime.UtcNow,
+                    SessionToken = sessionToken
+                };
+
+                _connectedClients[clientEndPoint] = connectedClient;
+                _playerIdToEndPoint[player.PlayerId] = clientEndPoint;
+
+                _logger.LogInformation("Player '{PlayerName}' ({Class}) connected to world {WorldId} on team {TeamId} [Session: {SessionToken}]",
+                    player.PlayerName, player.PlayerClass, worldId, player.TeamId, sessionToken.Length > 8 ? sessionToken[..8] + "..." : sessionToken);
+
+                // NUEVO: Enviar respuesta de conexión con información de lobby/mundo y session token
+                await SendConnectionResponse(clientEndPoint, player, worldId, sessionToken);
+
+                // Send initial equipment state
+                await SendEquipmentUpdate(clientEndPoint, player);
+
+                // Notify other players in the world/lobby
+                BroadcastToWorld(worldId, CreateNetworkMessage("player_joined", player.PlayerId,
+                    new PlayerJoinedData
+                    {
+                        PlayerName = player.PlayerName,
+                        PlayerClass = player.PlayerClass,
+                        TeamId = player.TeamId,
+                        IsLobby = IsLobby(worldId)
+                    }), excludeEndPoint: clientEndPoint);
+            }
+            finally
+            {
+                nameLock.Release();
+            }
 
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error handling client connect from {EndPoint}", clientEndPoint);
+            _logger.LogError(ex, "Error handling client connect");
             await SendErrorToClient(clientEndPoint, "Connection failed");
         }
     }
@@ -672,6 +830,12 @@ public class UdpNetworkService : IDisposable
                 return;
             }
 
+            // Clean up any stale old endpoint for this player before re-adding
+            if (_playerIdToEndPoint.TryGetValue(restoredPlayer.PlayerId, out var oldEndPoint))
+            {
+                _connectedClients.TryRemove(oldEndPoint, out _);
+            }
+
             // Re-add to connected clients
             var connectedClient = new ConnectedClient
             {
@@ -687,6 +851,9 @@ public class UdpNetworkService : IDisposable
 
             // Activate session
             _sessionManager.ActivateSession(session.SessionToken);
+
+            // Reset input buffer sequence tracking so the client can start from 0
+            _gameEngine.ResetPlayerInputBuffer(restoredPlayer.PlayerId);
 
             var timeSinceDisconnect = (float)(DateTime.UtcNow - session.PlayerState!.SavedAt).TotalSeconds;
 
@@ -805,7 +972,7 @@ public class UdpNetworkService : IDisposable
             }).ToList(),
 
             // Equipment (restored)
-            Equipment = new Dictionary<EquipmentSlot, LootItem>(
+            Equipment = new ConcurrentDictionary<EquipmentSlot, LootItem>(
                 savedState.Equipment.Select(kvp => new KeyValuePair<EquipmentSlot, LootItem>(
                     kvp.Key,
                     new LootItem
@@ -835,7 +1002,7 @@ public class UdpNetworkService : IDisposable
 
             // Reset network/activity fields
             LastActivity = DateTime.UtcNow,
-            AbilityCooldowns = new Dictionary<string, DateTime>(),
+            AbilityCooldowns = new ConcurrentDictionary<string, DateTime>(),
             MovementSpeedModifier = 1.0f,
             DamageReduction = 0.0f
         };
@@ -869,7 +1036,10 @@ public class UdpNetworkService : IDisposable
                     MaxHealth = player.MaxHealth,
                     Mana = player.Mana,
                     MaxMana = player.MaxMana,
-                    ExperiencePoints = player.ExperiencePoints
+                    ExperiencePoints = player.ExperiencePoints,
+                    Gold = player.AccountGold,
+                    AccountLevel = player.AccountLevel,
+                    AccountTotalXP = player.AccountTotalXP
                 },
                 ServerInfo = new ServerInfoData
                 {
@@ -1007,7 +1177,12 @@ public class UdpNetworkService : IDisposable
             // Click-to-move: validate target position bounds
             if (inputData.HasMoveTarget)
             {
-                if (Math.Abs(inputData.MoveTarget.X) > 250 || Math.Abs(inputData.MoveTarget.Y) > 250)
+                // Compute max world extent from largest possible grid (mode configs + room spacing + margin)
+                var maxGrid = Math.Max(
+                    _settings.GameModes.Values.Max(m => Math.Max(m.GridSizeX, m.GridSizeY)),
+                    Math.Max(_settings.WorldGeneration.WorldSizeX, _settings.WorldGeneration.WorldSizeY));
+                var worldBound = (maxGrid - 1) * _settings.WorldGeneration.RoomSpacing + 50f;
+                if (Math.Abs(inputData.MoveTarget.X) > worldBound || Math.Abs(inputData.MoveTarget.Y) > worldBound)
                 {
                     _logger.LogWarning("Invalid move target from {PlayerId}: ({X}, {Y})",
                         client.Player.PlayerId, inputData.MoveTarget.X, inputData.MoveTarget.Y);
@@ -1235,9 +1410,14 @@ public class UdpNetworkService : IDisposable
         var equippedIds = _equipmentSystem.GetEquippedItemIds(player);
         var abilities = _equipmentSystem.GetAvailableAbilities(player);
 
-        // Build inventory items list from player's bag
+        // Build inventory items list from player's bag (snapshot under lock)
+        List<LootItem> inventorySnapshot;
+        lock (player.InventoryLock)
+        {
+            inventorySnapshot = player.Inventory.ToList();
+        }
         var inventoryItems = new List<InventoryItemData>();
-        foreach (var lootItem in player.Inventory)
+        foreach (var lootItem in inventorySnapshot)
         {
             var equipId = lootItem.Properties.TryGetValue("equipment_id", out var eid)
                 ? eid?.ToString() ?? "" : "";
@@ -1428,7 +1608,356 @@ public class UdpNetworkService : IDisposable
         }
     }
 
-    // REMOVED: HandleTradeRequest (incomplete feature - will implement in future version)
+    private async Task HandleVendorCatalog(IPEndPoint clientEndPoint, NetworkMessage message)
+    {
+        if (!_connectedClients.TryGetValue(clientEndPoint, out var client))
+            return;
+
+        try
+        {
+            if (!IsLobby(client.WorldId))
+            {
+                await SendErrorToClient(clientEndPoint, "Vendor is only available in lobby");
+                return;
+            }
+
+            var catalog = _vendorService.GetCatalog(client.Player.AccountGold);
+            var response = CreateNetworkMessage("vendor_catalog", client.Player.PlayerId, catalog);
+            await SendAsync(clientEndPoint, response);
+            client.LastActivity = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing vendor catalog from {PlayerId}", client.Player.PlayerId);
+        }
+    }
+
+    private async Task HandleVendorBuy(IPEndPoint clientEndPoint, NetworkMessage message)
+    {
+        if (!_connectedClients.TryGetValue(clientEndPoint, out var client))
+            return;
+
+        try
+        {
+            if (!IsLobby(client.WorldId))
+            {
+                await SendErrorToClient(clientEndPoint, "Vendor is only available in lobby");
+                return;
+            }
+
+            var data = MessageDataConverter.Convert<BuyFromVendorMessage>(message.Data);
+            if (data == null || string.IsNullOrWhiteSpace(data.EquipmentId))
+            {
+                await SendErrorToClient(clientEndPoint, "Invalid vendor buy data");
+                return;
+            }
+
+            var (success, error, item) = _vendorService.BuyItem(client.Player, data.EquipmentId);
+
+            var responseData = new VendorBuyResponseData
+            {
+                Success = success,
+                Error = error,
+                RemainingGold = client.Player.AccountGold,
+                ItemName = item?.ItemName ?? string.Empty
+            };
+
+            var response = CreateNetworkMessage("vendor_buy_response", client.Player.PlayerId, responseData);
+            await SendAsync(clientEndPoint, response);
+
+            if (success)
+            {
+                await SendEquipmentUpdate(clientEndPoint, client.Player);
+            }
+
+            client.LastActivity = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing vendor buy from {PlayerId}", client.Player.PlayerId);
+        }
+    }
+
+    private async Task HandleVendorSell(IPEndPoint clientEndPoint, NetworkMessage message)
+    {
+        if (!_connectedClients.TryGetValue(clientEndPoint, out var client))
+            return;
+
+        try
+        {
+            if (!IsLobby(client.WorldId))
+            {
+                await SendErrorToClient(clientEndPoint, "Vendor is only available in lobby");
+                return;
+            }
+
+            var data = MessageDataConverter.Convert<SellToVendorMessage>(message.Data);
+            if (data == null || string.IsNullOrWhiteSpace(data.LootId))
+            {
+                await SendErrorToClient(clientEndPoint, "Invalid vendor sell data");
+                return;
+            }
+
+            var (success, error, goldEarned) = _vendorService.SellItem(client.Player, data.LootId);
+
+            var responseData = new VendorSellResponseData
+            {
+                Success = success,
+                Error = error,
+                GoldEarned = goldEarned,
+                TotalGold = client.Player.AccountGold
+            };
+
+            var response = CreateNetworkMessage("vendor_sell_response", client.Player.PlayerId, responseData);
+            await SendAsync(clientEndPoint, response);
+
+            if (success)
+            {
+                await SendEquipmentUpdate(clientEndPoint, client.Player);
+            }
+
+            client.LastActivity = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing vendor sell from {PlayerId}", client.Player.PlayerId);
+        }
+    }
+
+    private async Task HandleLeaderboard(IPEndPoint clientEndPoint, NetworkMessage message)
+    {
+        if (!_connectedClients.TryGetValue(clientEndPoint, out var client))
+            return;
+
+        try
+        {
+            var data = MessageDataConverter.Convert<LeaderboardRequestMessage>(message.Data);
+            var sortBy = data?.SortBy ?? "level";
+            var validSorts = new HashSet<string> { "level", "kills", "extractions", "kd", "damage", "healing" };
+            if (!validSorts.Contains(sortBy)) sortBy = "level";
+
+            var characters = await _playerRepository.GetLeaderboardCharacters(sortBy, 20);
+
+            var entries = new List<LeaderboardEntry>();
+            for (int i = 0; i < characters.Count; i++)
+            {
+                var c = characters[i];
+                entries.Add(new LeaderboardEntry
+                {
+                    Rank = i + 1,
+                    PlayerName = $"{c.CharacterName} ({c.Account?.PlayerName})",
+                    Level = c.CurrentLevel,
+                    Kills = c.CareerKills,
+                    Deaths = c.CareerDeaths,
+                    Extractions = c.TotalExtractions,
+                    DamageDealt = c.CareerDamageDealt,
+                    HealingDone = c.CareerHealingDone,
+                    MatchesPlayed = c.TotalMatchesPlayed
+                });
+            }
+
+            var responseData = new LeaderboardData { SortBy = sortBy, Entries = entries };
+            var response = CreateNetworkMessage("leaderboard", client.Player.PlayerId, responseData);
+            await SendAsync(clientEndPoint, response);
+            client.LastActivity = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing leaderboard from {PlayerId}", client.Player.PlayerId);
+        }
+    }
+
+    private async Task HandleInsureItem(IPEndPoint clientEndPoint, NetworkMessage message)
+    {
+        if (!_connectedClients.TryGetValue(clientEndPoint, out var client))
+            return;
+
+        try
+        {
+            if (!IsLobby(client.WorldId))
+            {
+                await SendErrorToClient(clientEndPoint, "Insurance is only available in lobby");
+                return;
+            }
+
+            var data = MessageDataConverter.Convert<InsureItemMessage>(message.Data);
+            if (data == null || string.IsNullOrWhiteSpace(data.LootId))
+            {
+                await SendErrorToClient(clientEndPoint, "Invalid insure item data");
+                return;
+            }
+
+            var player = client.Player;
+            LootItem? item = null;
+
+            // Check equipped items
+            foreach (var (slot, equip) in player.Equipment)
+            {
+                if (equip.LootId == data.LootId) { item = equip; break; }
+            }
+
+            // Check inventory
+            if (item == null)
+            {
+                lock (player.InventoryLock)
+                {
+                    item = player.Inventory.FirstOrDefault(i => i.LootId == data.LootId);
+                }
+            }
+
+            if (item == null)
+            {
+                var resp = new InsureItemResponseData { Success = false, Error = "Item not found" };
+                await SendAsync(clientEndPoint, CreateNetworkMessage("insure_item_response", player.PlayerId, resp));
+                return;
+            }
+
+            // Insurance cost: 20% of item value, minimum 10 gold
+            var cost = Math.Max(10, (int)(item.Value * 0.2));
+
+            // Atomically check insured status, gold, and deduct under lock
+            lock (player.InventoryLock)
+            {
+                // Re-check insured status inside lock to prevent double-charge race
+                if (item.Properties.TryGetValue("insured", out var alreadyInsured) && alreadyInsured is true)
+                {
+                    var resp = new InsureItemResponseData { Success = false, Error = "Item is already insured" };
+                    _ = SendAsync(clientEndPoint, CreateNetworkMessage("insure_item_response", player.PlayerId, resp));
+                    return;
+                }
+
+                if (player.AccountGold < cost)
+                {
+                    var resp = new InsureItemResponseData
+                    {
+                        Success = false,
+                        Error = $"Not enough gold. Need {cost}, have {player.AccountGold}"
+                    };
+                    // Cannot await inside lock, so send synchronously via fire-and-forget
+                    _ = SendAsync(clientEndPoint, CreateNetworkMessage("insure_item_response", player.PlayerId, resp));
+                    return;
+                }
+
+                player.AccountGold -= cost;
+                item.Properties["insured"] = true;
+            }
+
+            // Persist gold deduction (with compensation on failure)
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await _playerRepository.UpdateCareerStats(player.PlayerName, player.CharacterName, 0, 0, 0, 0, false, goldEarned: -cost);
+                }
+                catch (Exception ex)
+                {
+                    // Compensate: reverse the in-memory change
+                    lock (player.InventoryLock)
+                    {
+                        player.AccountGold += cost;
+                        item.Properties.Remove("insured");
+                    }
+                    _logger.LogError(ex, "Failed to persist insurance purchase for {Player}, reversed in-memory state", player.PlayerName);
+                }
+            });
+
+            var responseData = new InsureItemResponseData
+            {
+                Success = true,
+                Cost = cost,
+                RemainingGold = player.AccountGold,
+                ItemName = item.ItemName
+            };
+
+            await SendAsync(clientEndPoint, CreateNetworkMessage("insure_item_response", player.PlayerId, responseData));
+            _logger.LogInformation("Player {PlayerName} insured {ItemName} for {Cost} gold",
+                player.PlayerName, item.ItemName, cost);
+
+            client.LastActivity = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing insure item from {PlayerId}", client.Player.PlayerId);
+        }
+    }
+
+    private async Task HandleChallenges(IPEndPoint clientEndPoint, NetworkMessage message)
+    {
+        if (!_connectedClients.TryGetValue(clientEndPoint, out var client))
+            return;
+
+        try
+        {
+            var data = _challengeService.GetChallenges(client.Player.PlayerName);
+            var response = CreateNetworkMessage("challenges", client.Player.PlayerId, data);
+            await SendAsync(clientEndPoint, response);
+            client.LastActivity = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing challenges from {PlayerId}", client.Player.PlayerId);
+        }
+    }
+
+    private async Task HandleClaimChallenge(IPEndPoint clientEndPoint, NetworkMessage message)
+    {
+        if (!_connectedClients.TryGetValue(clientEndPoint, out var client))
+            return;
+
+        try
+        {
+            var data = MessageDataConverter.Convert<ClaimChallengeMessage>(message.Data);
+            if (data == null || string.IsNullOrWhiteSpace(data.ChallengeId))
+            {
+                await SendErrorToClient(clientEndPoint, "Invalid claim challenge data");
+                return;
+            }
+
+            var (success, error, goldReward) = _challengeService.ClaimReward(client.Player.PlayerName, data.ChallengeId);
+
+            if (success)
+            {
+                lock (client.Player.InventoryLock)
+                {
+                    client.Player.AccountGold += goldReward;
+                }
+
+                // Persist gold
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _playerRepository.UpdateCareerStats(client.Player.PlayerName, client.Player.CharacterName, 0, 0, 0, 0, false, goldEarned: goldReward);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to persist challenge reward for {Player}", client.Player.PlayerName);
+                        // Compensate: roll back in-memory gold on DB failure
+                        lock (client.Player.InventoryLock)
+                        {
+                            client.Player.AccountGold -= goldReward;
+                        }
+                    }
+                });
+            }
+
+            var responseData = new ClaimChallengeResponseData
+            {
+                Success = success,
+                Error = error,
+                GoldReward = goldReward,
+                TotalGold = client.Player.AccountGold
+            };
+
+            var response = CreateNetworkMessage("claim_challenge_response", client.Player.PlayerId, responseData);
+            await SendAsync(clientEndPoint, response);
+            client.LastActivity = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing claim challenge from {PlayerId}", client.Player.PlayerId);
+        }
+    }
 
     private async Task HandlePickupSoul(IPEndPoint clientEndPoint, NetworkMessage message)
     {
@@ -1632,11 +2161,8 @@ public class UdpNetworkService : IDisposable
                 SendLobbyUpdates();
             }
 
-            // Enviar world updates solo para mundos activos (no lobbies)
-            if (_worldUpdateCounter % 3 == 0)
-            {
-                SendOptimizedWorldUpdates();
-            }
+            // Enviar world updates (combat events, loot, mobs) every frame for responsive PvP
+            SendOptimizedWorldUpdates();
 
             // Player state updates cada 2 frames (15 FPS)
             if (_worldUpdateCounter % 2 == 0)
@@ -1756,7 +2282,7 @@ public class UdpNetworkService : IDisposable
                 filteredContainers?.Any() == true)
             {
                 await SendIfSmallEnough(clientEndPoint, CreateNetworkMessage("frame_update", string.Empty,
-                    new FrameUpdateData { FrameNumber = (uint) update.FrameNumber }));
+                    new FrameUpdateData { FrameNumber = update.FrameNumber }));
             }
         }
         catch (Exception ex)
@@ -1774,8 +2300,11 @@ public class UdpNetworkService : IDisposable
             var worldId = worldGroup.Key;
             var players = worldGroup.Select(c => c.Player).ToList();
 
-            // Build all player updates for this world
-            var allPlayerUpdates = players.Select(p => new PlayerUpdateData
+            // Build player updates only for changed players (delta compression)
+            var changedPlayers = players.Where(p => p.HasSignificantChange()).ToList();
+            if (changedPlayers.Count == 0) continue;
+
+            var allPlayerUpdates = changedPlayers.Select(p => new PlayerUpdateData
             {
                 PlayerId = p.PlayerId,
                 Position = new Vector2
@@ -1807,14 +2336,13 @@ public class UdpNetworkService : IDisposable
                 AttackSpeedMs = _gameEngine.GetEffectiveAttackSpeedMs(p),
                 AttackRange = _gameEngine.GetEffectiveAttackRange(p),
                 ActiveEffects = p.StatusEffects.Count > 0
-                    ? p.StatusEffects.Select(e => new StatusEffectData
-                    {
-                        EffectType = e.EffectType,
-                        RemainingMs = Math.Max(0, (int)(e.ExpiresAt - DateTime.UtcNow).TotalMilliseconds)
-                    }).ToList()
+                    ? SnapshotStatusEffects(p)
                     : null,
                 ExperiencePoints = p.ExperiencePoints,
-                XpToNextLevel = GameMathUtils.CalculateExperienceRequired(p.Level)
+                XpToNextLevel = GameMathUtils.CalculateExperienceRequired(p.Level),
+                HeadItemId = p.Equipment.TryGetValue(EquipmentSlot.Head, out var h) && h.Properties.TryGetValue("equipment_id", out var hId) ? hId?.ToString() ?? string.Empty : string.Empty,
+                BootsItemId = p.Equipment.TryGetValue(EquipmentSlot.Boots, out var b) && b.Properties.TryGetValue("equipment_id", out var bId) ? bId?.ToString() ?? string.Empty : string.Empty,
+                OffhandItemId = p.Equipment.TryGetValue(EquipmentSlot.Offhand, out var o) && o.Properties.TryGetValue("equipment_id", out var oId) ? oId?.ToString() ?? string.Empty : string.Empty
             }).ToList();
 
             var acknowledgedInputs = _gameEngine.GetAcknowledgedInputs(players);
@@ -1865,9 +2393,12 @@ public class UdpNetworkService : IDisposable
                             StateChecksum = isLastBatch ? checksum : 0
                         });
 
-                    _ = Task.Run(() => SendIfSmallEnough(client.EndPoint, message));
+                    _ = SendIfSmallEnough(client.EndPoint, message);
                 }
             }
+
+            // Mark as sent AFTER all clients have been processed (not before AOI filtering)
+            foreach (var p in changedPlayers) p.MarkAsSent();
         }
     }
 
@@ -1921,6 +2452,25 @@ public class UdpNetworkService : IDisposable
                 PlayerClass = p.PlayerClass
             }).ToList() ?? new List<ScoreboardEntryData>();
 
+            // Build corruption state snapshot
+            CorruptionStateData? corruptionState = null;
+            if (world != null && world.CorruptionWave > 0)
+            {
+                var balance = _settings.GameBalance;
+                int damage = (int)(balance.CorruptionDamageBase * Math.Pow(balance.CorruptionDamageScale, world.CorruptionWave - 1));
+                lock (world.CorruptionLock)
+                {
+                    corruptionState = new CorruptionStateData
+                    {
+                        CurrentWave = world.CorruptionWave,
+                        CorruptedRoomIds = world.CorruptedRooms.ToList(),
+                        WarningRoomIds = world.WarningRooms.ToList(),
+                        SecondsUntilNextWave = Math.Max(0, (world.NextWaveTime - DateTime.UtcNow).TotalSeconds),
+                        CurrentDamagePerSecond = damage
+                    };
+                }
+            }
+
             var essentialWorldState = CreateNetworkMessage("world_state_essential", string.Empty,
                 new WorldStateEssentialData
                 {
@@ -1936,33 +2486,62 @@ public class UdpNetworkService : IDisposable
                     RevivalAltars = altarDataList,
                     DoorStates = doorDataList,
                     ExtractionPoints = extractionPointDataList,
-                    Scoreboard = scoreboardDataList
+                    Scoreboard = scoreboardDataList,
+                    CorruptionState = corruptionState
                 });
 
             foreach (var client in clientsInWorld)
             {
-                _ = Task.Run(() => SendIfSmallEnough(client.EndPoint, essentialWorldState));
+                _ = SendIfSmallEnough(client.EndPoint, essentialWorldState);
             }
+        }
+    }
+
+    private static List<StatusEffectData> SnapshotStatusEffects(RealTimePlayer p)
+    {
+        lock (p.StatusEffectsLock)
+        {
+            return p.StatusEffects.Select(e => new StatusEffectData
+            {
+                EffectType = e.EffectType,
+                RemainingMs = Math.Max(0, (int)(e.ExpiresAt - DateTime.UtcNow).TotalMilliseconds)
+            }).ToList();
         }
     }
 
     private async Task SendIfSmallEnough(IPEndPoint clientEndPoint, NetworkMessage message)
     {
-        var data = MessagePackSerializer.Serialize(message);
+        if (_udpServer == null) return;
 
-        if (data.Length <= MAX_UDP_PAYLOAD)
+        try
         {
-            if (_udpServer != null)
+            var data = MessagePackSerializer.Serialize(message);
+
+            if (data.Length > 1200)
+            {
+                var compressed = Compress(data);
+                if (compressed.Length < data.Length)
+                {
+                    var compressedPacket = new byte[compressed.Length + 1];
+                    compressedPacket[0] = 0x1;
+                    Buffer.BlockCopy(compressed, 0, compressedPacket, 1, compressed.Length);
+                    data = compressedPacket;
+                }
+            }
+
+            if (data.Length <= MAX_UDP_PAYLOAD)
             {
                 await _udpServer.SendAsync(data, clientEndPoint);
                 Interlocked.Increment(ref _packetsSent);
             }
+            else
+            {
+                _logger.LogWarning("Message {Type} too large after compression ({Size} bytes, max {Max}), dropping",
+                    message.Type, data.Length, MAX_UDP_PAYLOAD);
+            }
         }
-        else
-        {
-            _logger.LogWarning("Message {Type} too large ({Size} bytes, max {Max}), dropping",
-                message.Type, data.Length, MAX_UDP_PAYLOAD);
-        }
+        catch (System.Net.Sockets.SocketException) { }
+        catch (ObjectDisposedException) { }
     }
 
     public async Task SendAsync(IPEndPoint endPoint, NetworkMessage message)
@@ -2060,6 +2639,7 @@ public class UdpNetworkService : IDisposable
                 playerIds.Count, worldId);
 
             // Crear mensaje de juego iniciado
+            var difficulty = _gameEngine.GetWorldDifficulty(worldId);
             var gameStartedMessage = CreateNetworkMessage("game_started", string.Empty,
                 new GameStartedData
                 {
@@ -2067,6 +2647,7 @@ public class UdpNetworkService : IDisposable
                     Message = "The game has started! Good luck!",
                     Timestamp = DateTime.UtcNow,
                     GameMode = "extraction_battle_royale",
+                    DifficultyTier = difficulty,
                     Instructions = new List<string>
                     {
                         "Explore the world and collect loot",
@@ -2086,6 +2667,9 @@ public class UdpNetworkService : IDisposable
 
             // Send game_started to all clients, then follow up with room data in small batches
             var roomData = GetWorldRoomData(worldId);
+            var totalConnections = roomData.Sum(r => r.Connections.Count);
+            _logger.LogInformation("[DoorDebug] Sending {RoomCount} rooms with {ConnTotal} total connections in batches to {ClientCount} clients",
+                roomData.Count, totalConnections, clientsInWorld.Count);
             var roomBatches = roomData
                 .Select((r, i) => new { Room = r, Index = i })
                 .GroupBy(x => x.Index / 7)
@@ -2127,6 +2711,8 @@ public class UdpNetworkService : IDisposable
                                 IsOpen = d.IsOpen,
                                 IsLocked = d.IsLocked
                             }).ToList();
+                            _logger.LogInformation("[DoorDebug] Sending {DoorCount} door states ({OpenCount} open, {LockedCount} locked) to {Player}",
+                                initDoors.Count, initDoors.Count(d => d.IsOpen), initDoors.Count(d => d.IsLocked), client.Player.PlayerName);
 
                             var initExtractionPoints = world.ExtractionPoints.Values.Select(e => new ExtractionPointData
                             {
@@ -2150,6 +2736,48 @@ public class UdpNetworkService : IDisposable
                                     ExtractionPoints = initExtractionPoints
                                 });
                             await SendAsync(client.EndPoint, initWorldState);
+                        }
+
+                        // Send immediate player position update so clients don't show stale lobby positions
+                        if (world != null)
+                        {
+                            var playerUpdates = world.Players.Values.Select(p => new PlayerUpdateData
+                            {
+                                PlayerId = p.PlayerId,
+                                Position = new Vector2 { X = (float)Math.Round(p.Position.X, 1), Y = (float)Math.Round(p.Position.Y, 1) },
+                                Velocity = Vector2.Zero,
+                                Direction = (float)Math.Round(p.Direction, 2),
+                                Health = p.Health,
+                                MaxHealth = p.MaxHealth,
+                                Mana = p.Mana,
+                                MaxMana = p.MaxMana,
+                                Level = p.Level,
+                                IsAlive = p.IsAlive,
+                                IsMoving = false,
+                                IsCasting = false,
+                                CurrentRoomId = p.CurrentRoomId,
+                                TeamId = p.TeamId,
+                                PlayerName = p.PlayerName,
+                                PlayerClass = p.PlayerClass,
+                                ExperiencePoints = p.ExperiencePoints,
+                                XpToNextLevel = GameMathUtils.CalculateExperienceRequired(p.Level),
+                                WeaponItemId = p.Equipment.TryGetValue(EquipmentSlot.Weapon, out var w2) && w2.Properties.TryGetValue("equipment_id", out var wId2) ? wId2?.ToString() ?? string.Empty : string.Empty,
+                                ChestItemId = p.Equipment.TryGetValue(EquipmentSlot.Chest, out var c2) && c2.Properties.TryGetValue("equipment_id", out var cId2) ? cId2?.ToString() ?? string.Empty : string.Empty,
+                                HeadItemId = p.Equipment.TryGetValue(EquipmentSlot.Head, out var h2) && h2.Properties.TryGetValue("equipment_id", out var hId2) ? hId2?.ToString() ?? string.Empty : string.Empty,
+                                BootsItemId = p.Equipment.TryGetValue(EquipmentSlot.Boots, out var b2) && b2.Properties.TryGetValue("equipment_id", out var bId2) ? bId2?.ToString() ?? string.Empty : string.Empty,
+                                OffhandItemId = p.Equipment.TryGetValue(EquipmentSlot.Offhand, out var o2) && o2.Properties.TryGetValue("equipment_id", out var oId2) ? oId2?.ToString() ?? string.Empty : string.Empty
+                            }).ToList();
+
+                            var posMsg = CreateNetworkMessage("player_states_batch", string.Empty,
+                                new PlayerStatesBatchData
+                                {
+                                    Players = playerUpdates,
+                                    BatchIndex = 0,
+                                    TotalBatches = 1,
+                                    AcknowledgedInputs = new Dictionary<string, uint>(),
+                                    StateChecksum = 0
+                                });
+                            await SendAsync(client.EndPoint, posMsg);
                         }
 
                         _logger.LogDebug("Sent game_started + {RoomCount} rooms to {PlayerName}",
@@ -2209,6 +2837,14 @@ public class UdpNetworkService : IDisposable
     {
         if (!_playerIdToEndPoint.TryGetValue(player.PlayerId, out var endPoint)) return;
 
+        // Invalidate session immediately to prevent reconnect-based item duplication.
+        // Extraction already stashed items and cleared inventory; a reconnect with the
+        // old session snapshot would duplicate the items.
+        if (_connectedClients.TryGetValue(endPoint, out var client) && !string.IsNullOrEmpty(client.SessionToken))
+        {
+            _sessionManager.InvalidateSession(client.SessionToken, "Extraction completed");
+        }
+
         _ = Task.Run(async () =>
         {
             try
@@ -2243,8 +2879,12 @@ public class UdpNetworkService : IDisposable
 
     var tasks = clientsInWorld.Select(client => SendAsync(client.EndPoint, message));
 
-    // Fire and forget - don't await to maintain performance
-    _ = Task.WhenAll(tasks);
+    // Fire and forget with error handling to prevent unobserved exceptions
+    _ = Task.WhenAll(tasks).ContinueWith(t =>
+    {
+        if (t.Exception != null)
+            _logger.LogError(t.Exception, "Error broadcasting to world {WorldId}", worldId);
+    }, TaskContinuationOptions.OnlyOnFaulted);
 }
 
 private async Task BroadcastChatMessage(ConnectedClient sender, string message, string chatType)
@@ -2419,9 +3059,10 @@ private void CleanupExpiredSessions(object? state)
         return null; // No balanced world found, will create new one
     }
 
-private RealTimePlayer CreateEnhancedPlayer(ClientConnectData connectData, IPEndPoint endPoint)
+private RealTimePlayer CreateEnhancedPlayer(ClientConnectData connectData, string playerClass, IPEndPoint endPoint)
 {
-    var baseStats = connectData.PlayerClass.ToLower() switch
+    var normalizedClass = playerClass.ToLower();
+    var baseStats = normalizedClass switch
     {
         "scout" => new { Health = 160, Mana = 100, Speed = 5.5f, ManaRegen = 5f },
         "tank" => new { Health = 300, Mana = 70, Speed = 4.0f, ManaRegen = 3f },
@@ -2435,7 +3076,7 @@ private RealTimePlayer CreateEnhancedPlayer(ClientConnectData connectData, IPEnd
     {
         PlayerId = Guid.NewGuid().ToString(),
         PlayerName = connectData.PlayerName,
-        PlayerClass = connectData.PlayerClass.ToLower(),
+        PlayerClass = normalizedClass,
         TeamId = connectData.TeamId,
         EndPoint = endPoint,
         Position = GetSpawnPosition(connectData.TeamId),
@@ -2448,14 +3089,13 @@ private RealTimePlayer CreateEnhancedPlayer(ClientConnectData connectData, IPEnd
         CurrentRoomId = "room_1_1",
         BaseManaRegenPerSecond = baseStats.ManaRegen,
         Inventory = new List<LootItem>(),
-        AbilityCooldowns = new Dictionary<string, DateTime>(),
+        AbilityCooldowns = new ConcurrentDictionary<string, DateTime>(),
         StatusEffects = new List<StatusEffect>(),
         MovementSpeedModifier = 1.0f,
         DamageReduction = 0.0f
     };
 
-    // Equip starting gear based on class
-    _equipmentSystem.EquipStartingGear(player);
+    // Equipment is loaded from DB in HandleClientConnect (no default gear)
 
     // ⭐ DELTA COMPRESSION: Force first update for new player
     player.ForceNextUpdate();
@@ -2617,7 +3257,11 @@ private Vector2 GetSpawnPosition(string teamId)
             var tasks = _connectedClients.Values
                 .Select(client => SendAsync(client.EndPoint, adminMessage));
 
-            _ = Task.WhenAll(tasks);
+            _ = Task.WhenAll(tasks).ContinueWith(t =>
+            {
+                if (t.Exception != null)
+                    _logger.LogError(t.Exception, "Error broadcasting admin message");
+            }, TaskContinuationOptions.OnlyOnFaulted);
         }
     }
 
@@ -2766,7 +3410,7 @@ private void SendServerPings()
     {
         client.LastPingId = _pingCounter;
         client.LastPingSentAt = DateTime.UtcNow;
-        _ = Task.Run(() => SendIfSmallEnough(client.EndPoint, pingMessage));
+        _ = SendIfSmallEnough(client.EndPoint, pingMessage);
     }
 }
 

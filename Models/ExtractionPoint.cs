@@ -7,6 +7,7 @@ public class ExtractionPoint
     public string RoomId { get; set; } = string.Empty;
     public bool IsActive { get; set; } = true;
     public int ExtractionTimeSeconds { get; set; } = 30;
+    public DateTime? CorruptedAt { get; set; }
     public List<string> PlayersExtracting { get; set; } = new();
     public Dictionary<string, DateTime> ExtractionStartTimes { get; set; } = new();
 }

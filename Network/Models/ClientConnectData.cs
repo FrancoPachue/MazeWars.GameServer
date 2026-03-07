@@ -1,9 +1,10 @@
-﻿using MessagePack;
+using MessagePack;
 
 namespace MazeWars.GameServer.Network.Models;
 
 /// <summary>
 /// Connection messages from client to server.
+/// Index [1] is CharacterName — server looks up the character to get the class.
 /// </summary>
 [MessagePackObject(keyAsPropertyName: false)]
 public class ClientConnectData
@@ -12,7 +13,7 @@ public class ClientConnectData
     public string PlayerName { get; set; } = string.Empty;
 
     [Key(1)]
-    public string PlayerClass { get; set; } = "scout";
+    public string CharacterName { get; set; } = string.Empty;
 
     [Key(2)]
     public string TeamId { get; set; } = string.Empty;
@@ -22,4 +23,7 @@ public class ClientConnectData
 
     [Key(4)]
     public string GameMode { get; set; } = "trios";
+
+    [Key(5)]
+    public string DifficultyTier { get; set; } = "normal";
 }

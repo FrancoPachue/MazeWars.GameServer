@@ -1,4 +1,5 @@
-﻿using MazeWars.GameServer.Configuration;
+﻿using System.Collections.Concurrent;
+using MazeWars.GameServer.Configuration;
 using MazeWars.GameServer.Engine.Loot.Interface;
 using MazeWars.GameServer.Engine.Loot.Models;
 using MazeWars.GameServer.Models;
@@ -14,18 +15,17 @@ public class LootSystem : ILootSystem
     private readonly ILogger<LootSystem> _logger;
     private readonly GameServerSettings _settings;
     private readonly LootSettings _lootSettings;
-    private readonly Random _random;
 
     // Loot tables and configuration
-    private readonly Dictionary<string, LootTable> _lootTables = new();
+    private readonly ConcurrentDictionary<string, LootTable> _lootTables = new();
     private readonly LootDistribution _lootDistribution = new();
 
     // World-specific loot tracking
-    private readonly Dictionary<string, LootStats> _worldLootStats = new();
-    private readonly Dictionary<string, Dictionary<string, DateTime>> _roomLastSpawn = new();
+    private readonly ConcurrentDictionary<string, LootStats> _worldLootStats = new();
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, DateTime>> _roomLastSpawn = new();
 
-    // Reusable buffer to avoid per-frame allocations
-    private readonly List<LootItem> _tempLootBuffer = new(32);
+    // Reusable buffer to avoid per-frame allocations (ThreadStatic for parallel safety)
+    [ThreadStatic] private static List<LootItem>? _tempLootBuffer;
 
     // Events
     public event Action<string, LootUpdate>? OnLootSpawned;
@@ -40,7 +40,6 @@ public class LootSystem : ILootSystem
     {
         _logger = logger;
         _settings = settings.Value;
-        _random = new Random();
 
         // Initialize loot settings from game server settings
         _lootSettings = new LootSettings
@@ -85,7 +84,7 @@ public class LootSystem : ILootSystem
         {
             if (ShouldDropOccur(drop))
             {
-                var quantity = _random.Next(drop.MinQuantity, drop.MaxQuantity + 1);
+                var quantity = Random.Shared.Next(drop.MinQuantity, drop.MaxQuantity + 1);
 
                 for (int i = 0; i < quantity; i++)
                 {
@@ -140,8 +139,8 @@ public class LootSystem : ILootSystem
         {
             // Add small random offset even with override position
             var randomOffset = new Vector2(
-                (float)(_random.NextDouble() - 0.5) * 2,
-                (float)(_random.NextDouble() - 0.5) * 2
+                (float)(Random.Shared.NextDouble() - 0.5) * 2,
+                (float)(Random.Shared.NextDouble() - 0.5) * 2
             );
             position = overridePosition.Value + randomOffset;
         }
@@ -149,8 +148,8 @@ public class LootSystem : ILootSystem
         {
             // Random position within room bounds
             var randomOffset = new Vector2(
-                (float)(_random.NextDouble() - 0.5) * room.Size.X * 0.8f,
-                (float)(_random.NextDouble() - 0.5) * room.Size.Y * 0.8f
+                (float)(Random.Shared.NextDouble() - 0.5) * room.Size.X * 0.8f,
+                (float)(Random.Shared.NextDouble() - 0.5) * room.Size.Y * 0.8f
             );
             position = room.Position + randomOffset;
         }
@@ -198,14 +197,53 @@ public class LootSystem : ILootSystem
         var qualityTier = 0;
         if (drop.ItemType == "weapon" || drop.ItemType == "armor")
         {
-            qualityTier = (int)ItemRaritySystem.RollQualityTier(_random);
+            qualityTier = (int)ItemRaritySystem.RollQualityTier(Random.Shared);
             loot.Properties["quality"] = qualityTier;
         }
 
-        // Build display name: "[Quality] [Rarity] BaseName"
+        // Roll affixes for equipment items (rarity >= Uncommon)
+        if ((drop.ItemType == "weapon" || drop.ItemType == "armor") && rarity >= 2)
+        {
+            var affixes = AffixSystem.RollAffixes(Random.Shared, rarity);
+            if (affixes.Count > 0)
+            {
+                loot.Properties["affixes"] = affixes.Select(a => new Dictionary<string, object>
+                {
+                    ["id"] = a.AffixId,
+                    ["name"] = a.DisplayName,
+                    ["type"] = a.Type == AffixType.Prefix ? "prefix" : "suffix",
+                    ["stat"] = a.StatKey,
+                    ["value"] = a.Value
+                }).ToList();
+
+                // Apply affix stats to item Stats dict for EquipmentSystem to read
+                // Flat stats (health, mana) stored as raw values; percentage stats stored as value * 100
+                foreach (var affix in affixes)
+                {
+                    var isFlat = affix.StatKey is "bonus_health" or "bonus_mana";
+                    var storeVal = isFlat ? (int)affix.Value : (int)(affix.Value * 100);
+                    if (loot.Stats.ContainsKey(affix.StatKey))
+                        loot.Stats[affix.StatKey] += storeVal;
+                    else
+                        loot.Stats[affix.StatKey] = storeVal;
+                }
+            }
+        }
+
+        // Build display name: "[Quality] [Rarity] AffixedName"
         var qualityPrefix = qualityTier > 0 ? $"{ItemRaritySystem.GetQualityName(qualityTier)} " : "";
         var rarityPrefix = rarity > 0 ? $"{ItemRaritySystem.GetRarityName(rarity)} " : "";
-        loot.ItemName = $"{qualityPrefix}{rarityPrefix}{drop.ItemName}";
+        var affixList = loot.Properties.TryGetValue("affixes", out var affixData) && affixData is List<Dictionary<string, object>> affixDicts
+            ? affixDicts.Select(d => new ItemAffix
+            {
+                DisplayName = d["name"]?.ToString() ?? "",
+                Type = d["type"]?.ToString() == "prefix" ? AffixType.Prefix : AffixType.Suffix
+            }).ToList()
+            : new List<ItemAffix>();
+        var affixedBaseName = affixList.Count > 0
+            ? AffixSystem.BuildAffixName(drop.ItemName, affixList)
+            : drop.ItemName;
+        loot.ItemName = $"{qualityPrefix}{rarityPrefix}{affixedBaseName}";
 
         loot.Value = CalculateItemValue(loot);
         return loot;
@@ -255,7 +293,7 @@ public class LootSystem : ILootSystem
         };
 
         // Select a valuable based on weighted random
-        var roll = (float)_random.NextDouble();
+        var roll = (float)Random.Shared.NextDouble();
         float cumulative = 0;
         string name = "Ruby";
         foreach (var (vName, chance) in valuables)
@@ -268,11 +306,11 @@ public class LootSystem : ILootSystem
             }
         }
 
-        var rarity = (int)ItemRaritySystem.RollRarity(_random, room.RoomType, "patrol");
+        var rarity = (int)ItemRaritySystem.RollRarity(Random.Shared, room.RoomType, "patrol");
 
         var pos = position ?? new Vector2(
-            room.Position.X + (float)(_random.NextDouble() - 0.5) * room.Size.X * 0.6f,
-            room.Position.Y + (float)(_random.NextDouble() - 0.5) * room.Size.Y * 0.6f
+            room.Position.X + (float)(Random.Shared.NextDouble() - 0.5) * room.Size.X * 0.6f,
+            room.Position.Y + (float)(Random.Shared.NextDouble() - 0.5) * room.Size.Y * 0.6f
         );
 
         var item = new LootItem
@@ -303,7 +341,7 @@ public class LootSystem : ILootSystem
             return;
         }
 
-        var room = availableRooms[_random.Next(availableRooms.Count)];
+        var room = availableRooms[Random.Shared.Next(availableRooms.Count)];
 
         // Choose appropriate loot table based on room state
         var tableId = room.IsCompleted ? "weapon_drops" : "consumable_drops";
@@ -368,20 +406,24 @@ public class LootSystem : ILootSystem
             return result;
         }
 
-        // Allow stacking even at max capacity
-        bool canStack = IsStackable(loot) && TryStackItem(player, loot);
-        if (!canStack && player.Inventory.Count >= _settings.GameBalance.MaxInventorySize)
-        {
-            result.ErrorMessage = "Inventory full";
-            result.InventoryFull = true;
-            return result;
-        }
-
-        // Successfully grab the loot
+        // Successfully grab the loot (TryRemove is atomic — prevents double-grab)
         if (world.AvailableLoot.TryRemove(lootId, out var grabbedLoot))
         {
-            if (!canStack)
-                player.Inventory.Add(grabbedLoot);
+            lock (player.InventoryLock)
+            {
+                // Allow stacking even at max capacity
+                bool canStack = IsStackable(grabbedLoot) && TryStackItem_Locked(player, grabbedLoot);
+                if (!canStack && player.Inventory.Count >= _settings.GameBalance.MaxInventorySize)
+                {
+                    // Put loot back — inventory is full
+                    world.AvailableLoot.TryAdd(lootId, grabbedLoot);
+                    result.ErrorMessage = "Inventory full";
+                    result.InventoryFull = true;
+                    return result;
+                }
+                if (!canStack)
+                    player.Inventory.Add(grabbedLoot);
+            }
             // else: TryStackItem already incremented existing stack
             result.Success = true;
             result.GrabbedItem = grabbedLoot;
@@ -431,15 +473,40 @@ public class LootSystem : ILootSystem
             DisplayName = $"{deadPlayer.PlayerName}'s Corpse"
         };
 
-        // Collect ALL items (equipped + inventory)
+        // Collect items — insured items go to stash, rest go to corpse
         var allItems = new List<LootItem>();
-        foreach (var (slot, equippedItem) in deadPlayer.Equipment)
-            allItems.Add(equippedItem);
-        foreach (var invItem in deadPlayer.Inventory)
-            allItems.Add(invItem);
+        var insuredItems = new List<LootItem>();
 
-        deadPlayer.Equipment.Clear();
-        deadPlayer.Inventory.Clear();
+        lock (deadPlayer.InventoryLock)
+        {
+            foreach (var (slot, equippedItem) in deadPlayer.Equipment)
+            {
+                if (equippedItem.Properties.TryGetValue("insured", out var ins) && ins is true)
+                {
+                    equippedItem.Properties.Remove("insured");
+                    insuredItems.Add(equippedItem);
+                }
+                else
+                    allItems.Add(equippedItem);
+            }
+
+            foreach (var invItem in deadPlayer.Inventory)
+            {
+                if (invItem.Properties.TryGetValue("insured", out var insInv) && insInv is true)
+                {
+                    invItem.Properties.Remove("insured");
+                    insuredItems.Add(invItem);
+                }
+                else
+                    allItems.Add(invItem);
+            }
+
+            // Store insured items on player for stash recovery
+            deadPlayer.InsuredRecovery = insuredItems;
+
+            deadPlayer.Inventory.Clear();
+            deadPlayer.Equipment.Clear();
+        }
 
         // Item destruction: randomly destroy a percentage of items (item sink)
         var destroyCount = (int)Math.Round(allItems.Count * _lootSettings.ItemDestructionRate);
@@ -448,7 +515,7 @@ public class LootSystem : ILootSystem
             // Fisher-Yates shuffle to randomize which items get destroyed
             for (int i = allItems.Count - 1; i > 0; i--)
             {
-                var j = _random.Next(i + 1);
+                var j = Random.Shared.Next(i + 1);
                 (allItems[i], allItems[j]) = (allItems[j], allItems[i]);
             }
 
@@ -501,46 +568,52 @@ public class LootSystem : ILootSystem
             return result;
         }
 
-        // Find the item in the container
-        var item = container.Contents.FirstOrDefault(i => i.LootId == lootId);
-        if (item == null)
+        // Lock container to prevent race conditions on concurrent grabs
+        lock (container.ContentsLock)
         {
-            result.ErrorMessage = "Item not in container";
-            return result;
-        }
+            // Find the item in the container
+            var item = container.Contents.FirstOrDefault(i => i.LootId == lootId);
+            if (item == null)
+            {
+                result.ErrorMessage = "Item not in container";
+                return result;
+            }
 
-        // Allow stacking even at max capacity
-        bool canStack = IsStackable(item) && TryStackItem(player, item);
-        if (!canStack && player.Inventory.Count >= _settings.GameBalance.MaxInventorySize)
-        {
-            result.ErrorMessage = "Inventory full";
-            result.InventoryFull = true;
-            return result;
-        }
+            // Move item to player inventory (locked for thread safety)
+            lock (player.InventoryLock)
+            {
+                // Allow stacking even at max capacity — check inside lock to prevent TOCTOU
+                bool canStack = IsStackable(item) && TryStackItem_Locked(player, item);
+                if (!canStack && player.Inventory.Count >= _settings.GameBalance.MaxInventorySize)
+                {
+                    result.ErrorMessage = "Inventory full";
+                    result.InventoryFull = true;
+                    return result;
+                }
 
-        // Move item to player inventory
-        container.Contents.Remove(item);
-        if (!canStack)
-            player.Inventory.Add(item);
+                container.Contents.Remove(item);
+                if (!canStack)
+                    player.Inventory.Add(item);
+            }
 
-        result.Success = true;
-        result.GrabbedItem = item;
+            result.Success = true;
+            result.GrabbedItem = item;
 
-        _logger.LogInformation("Player {PlayerName} grabbed {ItemName} from container {ContainerId}",
-            player.PlayerName, item.ItemName, containerId);
+            _logger.LogInformation("Player {PlayerName} grabbed {ItemName} from container {ContainerId}",
+                player.PlayerName, item.ItemName, containerId);
 
-        // If container is now empty, remove it
-        if (!container.Contents.Any())
-        {
-            world.LootContainers.TryRemove(containerId, out _);
-            OnContainerRemoved?.Invoke(world.WorldId, containerId);
-
-            _logger.LogDebug("Container {ContainerId} emptied and removed", containerId);
-        }
-        else
-        {
-            OnContainerUpdated?.Invoke(world.WorldId, container);
-        }
+            // If container is now empty, remove it
+            if (!container.Contents.Any())
+            {
+                world.LootContainers.TryRemove(containerId, out _);
+                OnContainerRemoved?.Invoke(world.WorldId, containerId);
+                _logger.LogDebug("Container {ContainerId} emptied and removed", containerId);
+            }
+            else
+            {
+                OnContainerUpdated?.Invoke(world.WorldId, container);
+            }
+        } // end lock
 
         return result;
     }
@@ -658,22 +731,38 @@ public class LootSystem : ILootSystem
     /// <summary>
     /// Try to stack an item onto an existing matching stack in the player's inventory.
     /// Returns true if successfully stacked (caller should NOT add a new slot).
+    /// Acquires InventoryLock internally.
     /// </summary>
     private static bool TryStackItem(RealTimePlayer player, LootItem item)
+    {
+        lock (player.InventoryLock)
+        {
+            return TryStackItem_Locked(player, item);
+        }
+    }
+
+    /// <summary>
+    /// Try to stack an item onto an existing matching stack in the player's inventory.
+    /// Caller MUST already hold player.InventoryLock.
+    /// </summary>
+    private static bool TryStackItem_Locked(RealTimePlayer player, LootItem item)
     {
         const int MaxStackSize = 99;
         var existing = player.Inventory.FirstOrDefault(i =>
             i.ItemName == item.ItemName && i.ItemType == item.ItemType && i.StackCount < MaxStackSize);
         if (existing == null) return false;
 
-        existing.StackCount += item.StackCount;
-        if (existing.StackCount > MaxStackSize)
+        var spaceAvailable = MaxStackSize - existing.StackCount;
+        if (item.StackCount <= spaceAvailable)
         {
-            // Overflow — leave remainder on the incoming item (won't be added by caller since we return true)
-            // For simplicity, clamp to max — single pickups won't overflow 99
-            existing.StackCount = MaxStackSize;
+            existing.StackCount += item.StackCount;
+            return true;
         }
-        return true;
+
+        // Partial fill: fill existing stack to max, reduce incoming item count for caller to handle
+        existing.StackCount = MaxStackSize;
+        item.StackCount -= spaceAvailable;
+        return false; // Caller adds remainder as new inventory slot
     }
 
     // =============================================
@@ -757,7 +846,7 @@ public class LootSystem : ILootSystem
             finalChance *= GetLuckModifier(player);
         }
 
-        return _random.NextDouble() < finalChance;
+        return Random.Shared.NextDouble() < finalChance;
     }
 
     // =============================================
@@ -788,7 +877,7 @@ public class LootSystem : ILootSystem
             _ => 0.25f
         };
 
-        if (_random.NextDouble() >= mobDropChance)
+        if (Random.Shared.NextDouble() >= mobDropChance)
         {
             _logger.LogDebug("💀 Mob {MobId} ({MobType}) failed drop gate ({Chance}%)",
                 deadMob.MobId, deadMob.MobType, mobDropChance * 100);
@@ -819,24 +908,24 @@ public class LootSystem : ILootSystem
 
             if (eligibleDrops.Any())
             {
-                var selectedDrop = eligibleDrops[_random.Next(eligibleDrops.Count)];
-                var rarity = ItemRaritySystem.RollRarity(_random, room.RoomType, deadMob.MobType.ToLower());
+                var selectedDrop = eligibleDrops[Random.Shared.Next(eligibleDrops.Count)];
+                var rarity = ItemRaritySystem.RollRarity(Random.Shared, room.RoomType, deadMob.MobType.ToLower());
                 var loot = CreateLootItemWithRarity(selectedDrop, room, (int)rarity, deadMob.Position);
                 container.Contents.Add(loot);
             }
         }
 
-        // Roll for key drop (separate from equipment)
+        // Roll for key drop (separate from equipment — reduced rates to keep doors meaningful)
         if (_lootTables.TryGetValue("key_drops", out var keyTable))
         {
             float keyDropChance = deadMob.MobType.ToLower() switch
             {
-                "boss" => 1.0f,
-                "elite" => 0.15f,
-                _ => 0.05f
+                "boss" => 0.5f,
+                "elite" => 0.08f,
+                _ => 0.02f
             };
 
-            if (_random.NextDouble() < keyDropChance)
+            if (Random.Shared.NextDouble() < keyDropChance)
             {
                 var eligibleKeys = keyTable.PossibleDrops
                     .Where(drop => ShouldDropOccur(drop, killer))
@@ -844,7 +933,7 @@ public class LootSystem : ILootSystem
 
                 if (eligibleKeys.Any())
                 {
-                    var selectedKey = eligibleKeys[_random.Next(eligibleKeys.Count)];
+                    var selectedKey = eligibleKeys[Random.Shared.Next(eligibleKeys.Count)];
                     var keyItem = new LootItem
                     {
                         LootId = Guid.NewGuid().ToString(),
@@ -899,6 +988,7 @@ public class LootSystem : ILootSystem
             completedRoom.RoomId, completingTeam, spawnedLoot.Count);
     }
 
+    // NOTE: Currently unused - boss loot is handled via ProcessMobDeathLoot which already has boss-specific logic
     public void ProcessBossDeathLoot(Mob bossMob, GameWorld world, RealTimePlayer killer)
     {
         if (!_lootTables.TryGetValue("equipment", out var lootTable))
@@ -923,11 +1013,11 @@ public class LootSystem : ILootSystem
         };
 
         // Boss drops 2-4 items
-        var dropCount = _random.Next(2, 5);
+        var dropCount = Random.Shared.Next(2, 5);
         for (int i = 0; i < dropCount; i++)
         {
-            var selectedDrop = lootTable.PossibleDrops[_random.Next(lootTable.PossibleDrops.Count)];
-            var rarity = ItemRaritySystem.RollRarity(_random, room.RoomType, "boss");
+            var selectedDrop = lootTable.PossibleDrops[Random.Shared.Next(lootTable.PossibleDrops.Count)];
+            var rarity = ItemRaritySystem.RollRarity(Random.Shared, room.RoomType, "boss");
             var loot = CreateLootItemWithRarity(selectedDrop, room, (int)rarity, bossMob.Position);
             container.Contents.Add(loot);
         }
@@ -946,6 +1036,7 @@ public class LootSystem : ILootSystem
     public void CleanupExpiredLoot(GameWorld world)
     {
         var currentTime = DateTime.UtcNow;
+        _tempLootBuffer ??= new List<LootItem>(32);
         _tempLootBuffer.Clear();
         foreach (var loot in world.AvailableLoot.Values)
         {
@@ -991,6 +1082,7 @@ public class LootSystem : ILootSystem
 
     public void ManageLootDensity(GameWorld world)
     {
+        _tempLootBuffer ??= new List<LootItem>(32);
         foreach (var room in world.Rooms.Values)
         {
             _tempLootBuffer.Clear();
@@ -1034,8 +1126,8 @@ public class LootSystem : ILootSystem
 
     public void CleanupWorldLoot(string worldId)
     {
-        _worldLootStats.Remove(worldId);
-        _roomLastSpawn.Remove(worldId);
+        _worldLootStats.TryRemove(worldId, out _);
+        _roomLastSpawn.TryRemove(worldId, out _);
 
         _logger.LogDebug("Cleaned up loot data for world {WorldId}", worldId);
     }
@@ -1153,6 +1245,10 @@ public class LootSystem : ILootSystem
         targetDoor.IsLocked = false;
         targetDoor.UnlockedByPlayerId = player.PlayerId;
         targetDoor.UnlockedAt = DateTime.UtcNow;
+
+        // Sync RoomDoor so world_state_essential sends correct IsLocked
+        if (world.Doors.TryGetValue(targetDoor.ConnectionId, out var roomDoor))
+            roomDoor.IsLocked = false;
 
         result.Success = true;
         result.ConnectionId = targetDoor.ConnectionId;

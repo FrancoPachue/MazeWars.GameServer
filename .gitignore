@@ -11,6 +11,14 @@
 *.sln.docstates
 *.env
 
+# SQLite database
+mazewars.db
+mazewars.db-wal
+mazewars.db-shm
+
+# Production config with secrets
+appsettings.Production.json
+
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 

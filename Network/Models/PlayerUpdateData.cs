@@ -90,4 +90,13 @@ public class PlayerUpdateData
 
     [Key(23)]
     public int XpToNextLevel { get; set; }
+
+    [Key(24)]
+    public string HeadItemId { get; set; } = string.Empty;
+
+    [Key(25)]
+    public string BootsItemId { get; set; } = string.Empty;
+
+    [Key(26)]
+    public string OffhandItemId { get; set; } = string.Empty;
 }

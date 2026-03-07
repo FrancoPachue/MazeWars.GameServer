@@ -11,6 +11,7 @@ using MazeWars.GameServer.Engine.Network;
 using MazeWars.GameServer.Engine.Memory;
 using MazeWars.GameServer.Engine.Managers;
 using MazeWars.GameServer.Engine.Stash;
+using MazeWars.GameServer.Engine.Challenges;
 using MazeWars.GameServer.Data.Repositories;
 using MazeWars.GameServer.Models;
 using MazeWars.GameServer.Network;
@@ -37,15 +38,14 @@ public class RealTimeGameEngine
     private readonly InputProcessor _inputProcessor;
     private readonly StashService _stashService;
     private readonly IPlayerRepository _playerRepository;
+    private readonly ChallengeService _challengeService;
 
     private readonly Timer _gameLoopTimer;
 
-    private readonly ConcurrentDictionary<string, ConcurrentBag<CombatEvent>> _recentCombatEvents = new();
-    private readonly ConcurrentDictionary<string, ConcurrentBag<LootUpdate>> _recentLootUpdates = new();
+    private readonly ConcurrentDictionary<string, ConcurrentQueue<CombatEvent>> _recentCombatEvents = new();
+    private readonly ConcurrentDictionary<string, ConcurrentQueue<LootUpdate>> _recentLootUpdates = new();
 
-    private readonly Queue<PlayerStateUpdate> _playerUpdatePool = new();
-    private readonly Queue<CombatEvent> _combatEventPool = new();
-    private readonly Random _random = new();
+    // Removed: _random field — use Random.Shared for thread safety in parallel contexts
 
     private int _frameNumber = 0;
     private DateTime _lastFrameTime = DateTime.UtcNow;
@@ -67,7 +67,8 @@ public class RealTimeGameEngine
         WorldManager worldManager,
         InputProcessor inputProcessor,
         StashService stashService,
-        IPlayerRepository playerRepository)
+        IPlayerRepository playerRepository,
+        ChallengeService challengeService)
     {
         _logger = logger;
         _settings = settings.Value;
@@ -81,6 +82,7 @@ public class RealTimeGameEngine
         _inputProcessor = inputProcessor;
         _stashService = stashService;
         _playerRepository = playerRepository;
+        _challengeService = challengeService;
 
         // ⭐ REFACTORED: Configure InputProcessor with player lookup
         _inputProcessor.PlayerLookup = FindPlayer;
@@ -158,10 +160,11 @@ public class RealTimeGameEngine
         {
             var xpReward = (mob is MazeWars.GameServer.Engine.MobIASystem.Models.EnhancedMob enhMob)
                 ? enhMob.EnhancedStats.ExperienceReward : 0;
-            var xpAmount = xpReward > 0 ? xpReward : (_random.Next(50, 81));
+            var xpAmount = xpReward > 0 ? xpReward : (Random.Shared.Next(50, 81));
             killer.ExperiencePoints += xpAmount;
             killer.MobKills++;
             CheckLevelUp(killer);
+            _challengeService.UpdateProgress(killer.PlayerName, "mob_kills", 1);
         }
 
         AddCombatEvent(worldId, new CombatEvent
@@ -180,9 +183,7 @@ public class RealTimeGameEngine
 
     private void HandlePlayerKilledByMob(RealTimePlayer deadPlayer, Mob killerMob)
     {
-        // Reuse the same player death logic (loot drop, death event)
-        HandlePlayerDeath(deadPlayer, null);
-
+        // Death is already processed via CombatSystem.ProcessPlayerDeath → OnPlayerDeath → HandlePlayerDeath
         _logger.LogInformation("Player {PlayerName} killed by mob {MobType} {MobId}",
             deadPlayer.PlayerName, killerMob.MobType, killerMob.MobId);
     }
@@ -264,7 +265,7 @@ public class RealTimeGameEngine
     // EVENT HANDLERS DEL CONTAINER SYSTEM
     // =============================================
 
-    private readonly ConcurrentDictionary<string, ConcurrentBag<ContainerUpdate>> _recentContainerUpdates = new();
+    private readonly ConcurrentDictionary<string, ConcurrentQueue<ContainerUpdate>> _recentContainerUpdates = new();
 
     private void HandleContainerSpawned(string worldId, LootContainer container)
     {
@@ -317,9 +318,9 @@ public class RealTimeGameEngine
 
     private void AddContainerUpdate(string worldId, ContainerUpdate update)
     {
-        var bag = _recentContainerUpdates.GetOrAdd(worldId, _ => new ConcurrentBag<ContainerUpdate>());
-        if (bag.Count < MaxEventsPerBag)
-            bag.Add(update);
+        var queue = _recentContainerUpdates.GetOrAdd(worldId, _ => new ConcurrentQueue<ContainerUpdate>());
+        if (queue.Count < MaxEventsPerBag)
+            queue.Enqueue(update);
     }
 
     private List<ContainerUpdate> GetAndClearRecentContainerUpdates(string worldId)
@@ -395,9 +396,11 @@ public class RealTimeGameEngine
                     case "ability_damage_crit":
                     case "projectile_hit":
                         source.DamageDealt += combatEvent.Value;
+                        _challengeService.UpdateProgress(source.PlayerName, "damage_dealt", combatEvent.Value);
                         break;
                     case "heal":
                         source.HealingDone += combatEvent.Value;
+                        _challengeService.UpdateProgress(source.PlayerName, "healing_done", combatEvent.Value);
                         break;
                 }
             }
@@ -415,10 +418,22 @@ public class RealTimeGameEngine
         // Track stats
         deadPlayer.Deaths++;
         if (killer != null)
+        {
             killer.Kills++;
+            _challengeService.UpdateProgress(killer.PlayerName, "player_kills", 1);
+        }
 
         // Usar LootSystem para drop de items del jugador
         _lootSystem.DropPlayerLoot(deadPlayer, world);
+
+        // Recover insured items to stash
+        if (deadPlayer.InsuredRecovery.Count > 0)
+        {
+            _stashService.StashItems(deadPlayer.PlayerName, deadPlayer.InsuredRecovery);
+            _logger.LogInformation("Player {PlayerName} death: {Count} insured items recovered to stash",
+                deadPlayer.PlayerName, deadPlayer.InsuredRecovery.Count);
+            deadPlayer.InsuredRecovery.Clear();
+        }
 
         // XP for killer
         if (killer != null)
@@ -530,12 +545,9 @@ public class RealTimeGameEngine
                 var updatedWorld = _worldManager.GetWorld(worldId);
                 if (updatedWorld != null && updatedWorld.Players.Count == 0)
                 {
-                    _mobAISystem.CleanupWorldAI(worldId);
-                    _lootSystem.CleanupWorldLoot(worldId);
-                    _movementSystem.CleanupWorldData(worldId);
-
-                    _worldManager.RemoveWorld(worldId);
-                    _logger.LogInformation("Removed empty world {WorldId}", worldId);
+                    // Don't destroy immediately — allow reconnection grace period (60s)
+                    updatedWorld.EmptySince = DateTime.UtcNow;
+                    _logger.LogInformation("World {WorldId} is now empty, grace period started (60s for reconnection)", worldId);
                 }
             }
             return;
@@ -721,6 +733,25 @@ public class RealTimeGameEngine
         // Skip update for ended matches
         if (world.MatchEnded) return;
 
+        // Grace period: destroy empty worlds after 60s (allows reconnection)
+        if (world.EmptySince != null)
+        {
+            if (world.Players.Count > 0)
+            {
+                // Player reconnected — cancel grace period
+                world.EmptySince = null;
+            }
+            else if ((DateTime.UtcNow - world.EmptySince.Value).TotalSeconds > 60)
+            {
+                _mobAISystem.CleanupWorldAI(world.WorldId);
+                _lootSystem.CleanupWorldLoot(world.WorldId);
+                _movementSystem.CleanupWorldData(world.WorldId);
+                _worldManager.RemoveWorld(world.WorldId);
+                _logger.LogInformation("Removed empty world {WorldId} after grace period", world.WorldId);
+                return;
+            }
+        }
+
         // Movement + collision for all worlds (including lobby)
         _movementSystem.UpdateAllPlayersMovement(world, deltaTime);
 
@@ -783,7 +814,7 @@ public class RealTimeGameEngine
                     player.IsMoving = false;
 
                     // Equip free T1 starting gear if player has no equipment (died and lost everything)
-                    if (player.Equipment.Count == 0)
+                    if (player.Equipment.IsEmpty)
                     {
                         _equipmentSystem.EquipStartingGear(player);
                     }
@@ -811,35 +842,69 @@ public class RealTimeGameEngine
         // Initialize corruption on first call past delay
         if (world.CorruptionWave == 0)
         {
+            // Compute and cache grid center + max distance
+            ComputeGridCenter(world);
+
             world.CorruptionWave = 1;
             world.CorruptionStartTime = now;
             world.NextWaveTime = now.AddSeconds(balance.CorruptionWaveIntervalSeconds);
-            CorruptRoomsByDistance(world, 2); // Edge rooms (Chebyshev dist 2)
+
+            // Wave 1 corrupts outermost ring
+            CorruptRoomsByDistance(world, world.MaxChebyshevDistance);
+            SpawnExtractionPortals(world);
             return;
         }
 
-        // Advance wave when timer expires (max 3 waves)
-        if (world.CorruptionWave < 3 && now >= world.NextWaveTime)
+        int totalWaves = world.MaxChebyshevDistance + 1; // +1 for final collapse wave
+
+        // Advance wave when timer expires
+        if (world.CorruptionWave < totalWaves && now >= world.NextWaveTime)
         {
             world.CorruptionWave++;
-            world.NextWaveTime = now.AddSeconds(balance.CorruptionWaveIntervalSeconds);
             world.WarningRooms.Clear();
 
-            int targetDistance = 3 - world.CorruptionWave; // Wave 2→dist 1, Wave 3→dist 0
-            CorruptRoomsByDistance(world, targetDistance);
+            if (world.CorruptionWave < totalWaves)
+            {
+                // Normal wave: shrink inward
+                world.NextWaveTime = now.AddSeconds(balance.CorruptionWaveIntervalSeconds);
+                int targetDistance = world.MaxChebyshevDistance - world.CorruptionWave + 1;
+                CorruptRoomsByDistance(world, Math.Max(targetDistance, 0));
+                SpawnExtractionPortals(world);
+            }
+            else
+            {
+                // Final wave: collapse ALL remaining rooms (including spawn/extraction)
+                world.NextWaveTime = now.AddSeconds(balance.CorruptionFinalCollapseDelaySeconds);
+                CorruptAllRemainingRooms(world);
+                SpawnExtractionPortals(world); // Will be no-op since no safe rooms remain
+            }
         }
 
         // Warning: mark rooms about to corrupt 30s before next wave
-        if (world.CorruptionWave < 3 && world.WarningRooms.Count == 0)
+        if (world.CorruptionWave < totalWaves && world.WarningRooms.Count == 0)
         {
             var timeUntilWave = (world.NextWaveTime - now).TotalSeconds;
             if (timeUntilWave <= balance.CorruptionWarningSeconds)
             {
-                int nextTargetDist = 3 - (world.CorruptionWave + 1);
+                bool isFinalWaveNext = world.CorruptionWave + 1 == totalWaves;
+
                 foreach (var room in world.Rooms.Values)
                 {
                     if (world.CorruptedRooms.Contains(room.RoomId)) continue;
-                    if (GetRoomChebyshevDistance(room.RoomId) == nextTargetDist)
+
+                    bool shouldWarn;
+                    if (isFinalWaveNext)
+                    {
+                        // Final wave warns ALL remaining rooms
+                        shouldWarn = true;
+                    }
+                    else
+                    {
+                        int nextTargetDist = world.MaxChebyshevDistance - (world.CorruptionWave + 1) + 1;
+                        shouldWarn = GetRoomChebyshevDistance(room.RoomId, world.GridCenterX, world.GridCenterY) >= Math.Max(nextTargetDist, 0);
+                    }
+
+                    if (shouldWarn)
                     {
                         world.WarningRooms.Add(room.RoomId);
                         AddCombatEvent(world.WorldId, new CombatEvent
@@ -864,10 +929,11 @@ public class RealTimeGameEngine
                 if (!world.CorruptedRooms.Contains(player.CurrentRoomId)) continue;
 
                 player.Health = Math.Max(0, player.Health - damage);
-                if (player.Health <= 0)
+                player.LastDamageTime = now;
+                if (player.Health <= 0 && player.TryKill())
                 {
-                    player.IsAlive = false;
                     player.DeathTime = now;
+                    HandlePlayerDeath(player, null);
                 }
 
                 AddCombatEvent(world.WorldId, new CombatEvent
@@ -879,7 +945,57 @@ public class RealTimeGameEngine
                     RoomId = player.CurrentRoomId
                 });
             }
+
+            // Deactivate portals whose grace period has expired
+            foreach (var portal in world.ExtractionPoints.Values)
+            {
+                if (!portal.IsActive || portal.CorruptedAt == null) continue;
+                if ((now - portal.CorruptedAt.Value).TotalSeconds < balance.PortalCorruptionGraceSeconds) continue;
+
+                portal.IsActive = false;
+
+                // Cancel in-progress extractions at this portal
+                foreach (var playerId in portal.PlayersExtracting.ToList())
+                {
+                    CancelPlayerExtraction(world, playerId, portal);
+                }
+                portal.PlayersExtracting.Clear();
+                portal.ExtractionStartTimes.Clear();
+
+                AddCombatEvent(world.WorldId, new CombatEvent
+                {
+                    EventType = "extraction_deactivated",
+                    TargetId = portal.ExtractionId,
+                    RoomId = portal.RoomId,
+                    Position = portal.Position
+                });
+
+                _logger.LogInformation("Portal {PortalId} deactivated after grace period in corrupted room {RoomId}",
+                    portal.ExtractionId, portal.RoomId);
+            }
         }
+    }
+
+    private void ComputeGridCenter(GameWorld world)
+    {
+        int maxX = 0, maxY = 0;
+        foreach (var room in world.Rooms.Values)
+        {
+            var parts = room.RoomId.Split('_');
+            if (parts.Length >= 3 && int.TryParse(parts[1], out var x) && int.TryParse(parts[2], out var y))
+            {
+                if (x > maxX) maxX = x;
+                if (y > maxY) maxY = y;
+            }
+        }
+        world.GridCenterX = maxX / 2;
+        world.GridCenterY = maxY / 2;
+        world.MaxChebyshevDistance = Math.Max(
+            Math.Max(world.GridCenterX, maxX - world.GridCenterX),
+            Math.Max(world.GridCenterY, maxY - world.GridCenterY));
+
+        _logger.LogInformation("Grid center computed: ({CenterX},{CenterY}), MaxDist={MaxDist}",
+            world.GridCenterX, world.GridCenterY, world.MaxChebyshevDistance);
     }
 
     private void CorruptRoomsByDistance(GameWorld world, int targetDistance)
@@ -889,20 +1005,42 @@ public class RealTimeGameEngine
         foreach (var room in world.Rooms.Values)
         {
             if (world.CorruptedRooms.Contains(room.RoomId)) continue;
-            if (room.RoomType is "spawn" or "extraction_zone") continue;
+            if (room.RoomType is "spawn") continue;
 
-            if (GetRoomChebyshevDistance(room.RoomId) >= targetDistance)
+            if (GetRoomChebyshevDistance(room.RoomId, world.GridCenterX, world.GridCenterY) >= targetDistance)
                 newlyCorrupted.Add(room.RoomId);
         }
 
         // Auto-unlock doors BEFORE corrupting, so players aren't trapped
         AutoUnlockDoorsForCorruption(world, newlyCorrupted);
 
-        // Now apply corruption
+        // Now apply corruption + deactivate revival altars in corrupted rooms
         foreach (var roomId in newlyCorrupted)
         {
             world.CorruptedRooms.Add(roomId);
             world.WarningRooms.Remove(roomId);
+
+            // Deactivate revival altars in newly corrupted rooms
+            foreach (var altar in world.RevivalAltars.Values)
+            {
+                if (altar.RoomId == roomId) altar.IsActive = false;
+            }
+
+            // Mark extraction portals for grace period (don't deactivate yet)
+            foreach (var ep in world.ExtractionPoints.Values)
+            {
+                if (ep.RoomId == roomId && ep.IsActive && ep.CorruptedAt == null)
+                {
+                    ep.CorruptedAt = DateTime.UtcNow;
+                    AddCombatEvent(world.WorldId, new CombatEvent
+                    {
+                        EventType = "extraction_corrupting",
+                        TargetId = ep.ExtractionId,
+                        RoomId = roomId,
+                        Position = ep.Position
+                    });
+                }
+            }
 
             AddCombatEvent(world.WorldId, new CombatEvent
             {
@@ -912,6 +1050,129 @@ public class RealTimeGameEngine
 
             _logger.LogInformation("Room {RoomId} corrupted (wave {Wave})",
                 roomId, world.CorruptionWave);
+        }
+    }
+
+    private void CorruptAllRemainingRooms(GameWorld world)
+    {
+        var newlyCorrupted = new HashSet<string>();
+        foreach (var room in world.Rooms.Values)
+        {
+            if (!world.CorruptedRooms.Contains(room.RoomId))
+                newlyCorrupted.Add(room.RoomId);
+        }
+
+        // Auto-unlock doors before final collapse
+        AutoUnlockDoorsForCorruption(world, newlyCorrupted);
+
+        foreach (var roomId in newlyCorrupted)
+        {
+            world.CorruptedRooms.Add(roomId);
+            world.WarningRooms.Remove(roomId);
+
+            // Mark extraction portals for grace period
+            foreach (var ep in world.ExtractionPoints.Values)
+            {
+                if (ep.RoomId == roomId && ep.IsActive && ep.CorruptedAt == null)
+                {
+                    ep.CorruptedAt = DateTime.UtcNow;
+                    AddCombatEvent(world.WorldId, new CombatEvent
+                    {
+                        EventType = "extraction_corrupting",
+                        TargetId = ep.ExtractionId,
+                        RoomId = roomId,
+                        Position = ep.Position
+                    });
+                }
+            }
+
+            AddCombatEvent(world.WorldId, new CombatEvent
+            {
+                EventType = "room_corrupted",
+                RoomId = roomId
+            });
+
+            _logger.LogInformation("Room {RoomId} corrupted by final collapse (wave {Wave})",
+                roomId, world.CorruptionWave);
+        }
+
+        // Deactivate ALL revival altars
+        foreach (var altar in world.RevivalAltars.Values)
+            altar.IsActive = false;
+
+        _logger.LogInformation("Final corruption wave: ALL {Count} remaining rooms corrupted in world {WorldId}",
+            newlyCorrupted.Count, world.WorldId);
+    }
+
+    /// <summary>
+    /// Spawn extraction portals in safe rooms. Called each wave from UpdateCorruption.
+    /// Portal count = ceil(alivePlayers / PortalPlayersPerPortal), min 1.
+    /// Portals appear only from PortalFirstSpawnWave onward.
+    /// </summary>
+    private void SpawnExtractionPortals(GameWorld world)
+    {
+        var balance = _settings.GameBalance;
+        if (world.CorruptionWave < balance.PortalFirstSpawnWave) return;
+
+        int alivePlayers = world.Players.Values.Count(p => p.IsAlive);
+        if (alivePlayers <= 0) return;
+
+        int portalCount = Math.Max(1, (int)Math.Ceiling((double)alivePlayers / balance.PortalPlayersPerPortal));
+
+        // Build candidate rooms: not corrupted, not warning, not spawn, no active portal already
+        var activePortalRooms = new HashSet<string>(
+            world.ExtractionPoints.Values.Where(ep => ep.IsActive).Select(ep => ep.RoomId));
+
+        var candidates = new List<(string RoomId, int Distance)>();
+        foreach (var room in world.Rooms.Values)
+        {
+            if (world.CorruptedRooms.Contains(room.RoomId)) continue;
+            if (world.WarningRooms.Contains(room.RoomId)) continue;
+            if (room.RoomType == "spawn") continue;
+            if (activePortalRooms.Contains(room.RoomId)) continue;
+
+            int dist = GetRoomChebyshevDistance(room.RoomId, world.GridCenterX, world.GridCenterY);
+            candidates.Add((room.RoomId, dist));
+        }
+
+        if (candidates.Count == 0) return;
+
+        // Sort by Chebyshev distance descending (outer safe rooms first), shuffle within tiers
+        var sorted = candidates
+            .GroupBy(c => c.Distance)
+            .OrderByDescending(g => g.Key)
+            .SelectMany(g => g.OrderBy(_ => Random.Shared.Next()))
+            .ToList();
+
+        int toSpawn = Math.Min(portalCount, sorted.Count);
+
+        for (int i = 0; i < toSpawn; i++)
+        {
+            var (roomId, _) = sorted[i];
+            if (!world.Rooms.TryGetValue(roomId, out var room)) continue;
+
+            var portalId = $"portal_w{world.CorruptionWave}_{roomId}";
+            var portal = new ExtractionPoint
+            {
+                ExtractionId = portalId,
+                Position = room.Position, // room center
+                RoomId = roomId,
+                IsActive = true,
+                ExtractionTimeSeconds = balance.PortalExtractionTimeSeconds
+            };
+
+            world.ExtractionPoints[portalId] = portal;
+
+            AddCombatEvent(world.WorldId, new CombatEvent
+            {
+                EventType = "extraction_spawned",
+                TargetId = portalId,
+                RoomId = roomId,
+                Position = room.Position
+            });
+
+            _logger.LogInformation("Extraction portal {PortalId} spawned in room {RoomId} (wave {Wave}, {Alive} alive players)",
+                portalId, roomId, world.CorruptionWave, alivePlayers);
         }
     }
 
@@ -966,6 +1227,10 @@ public class RealTimeGameEngine
                     door.UnlockedByPlayerId = "corruption_system";
                     door.UnlockedAt = DateTime.UtcNow;
 
+                    // Sync RoomDoor so world_state_essential sends correct IsLocked
+                    if (world.Doors.TryGetValue(door.ConnectionId, out var roomDoor))
+                        roomDoor.IsLocked = false;
+
                     AddCombatEvent(world.WorldId, new CombatEvent
                     {
                         EventType = "door_unlocked",
@@ -984,14 +1249,14 @@ public class RealTimeGameEngine
 
     /// <summary>
     /// Extracts grid coordinates from a room ID (e.g., "room_2_3" → x=2, y=3)
-    /// and returns the Chebyshev distance from the grid center (2,2 for a 5x5 grid).
+    /// and returns the Chebyshev distance from the grid center.
     /// </summary>
-    private static int GetRoomChebyshevDistance(string roomId)
+    private static int GetRoomChebyshevDistance(string roomId, int centerX, int centerY)
     {
         var parts = roomId.Split('_');
         if (parts.Length >= 3 && int.TryParse(parts[1], out var x) && int.TryParse(parts[2], out var y))
         {
-            return Math.Max(Math.Abs(x - 2), Math.Abs(y - 2));
+            return Math.Max(Math.Abs(x - centerX), Math.Abs(y - centerY));
         }
         return 0; // Unknown room, treat as center
     }
@@ -1211,53 +1476,54 @@ public class RealTimeGameEngine
         var world = FindWorldByPlayer(player.PlayerId);
         if (world == null) return;
 
-        var item = player.Inventory.FirstOrDefault(i => i.LootId == useItem.ItemId);
-        if (item == null)
+        lock (player.InventoryLock)
         {
-            // Normal race condition: client sent use_item before receiving inventory update
-            _logger.LogDebug("Player {PlayerName} tried to use already-consumed item {ItemId}",
-                player.PlayerName, useItem.ItemId);
-            // Resync inventory so client removes the stale item
-            OnInventoryChanged?.Invoke(world.WorldId, player);
-            return;
-        }
-
-        var result = _lootSystem.UseItem(player, item, world);
-
-        if (result.Success && result.ItemConsumed)
-        {
-            if (item.StackCount > 1)
+            var item = player.Inventory.FirstOrDefault(i => i.LootId == useItem.ItemId);
+            if (item == null)
             {
-                item.StackCount--;
+                _logger.LogDebug("Player {PlayerName} tried to use already-consumed item {ItemId}",
+                    player.PlayerName, useItem.ItemId);
+                OnInventoryChanged?.Invoke(world.WorldId, player);
+                return;
             }
-            else
+
+            var result = _lootSystem.UseItem(player, item, world);
+
+            if (result.Success && result.ItemConsumed)
             {
-                player.Inventory.Remove(item);
+                if (item.StackCount > 1)
+                {
+                    item.StackCount--;
+                }
+                else
+                {
+                    player.Inventory.Remove(item);
+                }
+                RecalculatePlayerWeight(player);
+                OnInventoryChanged?.Invoke(world.WorldId, player);
             }
-            RecalculatePlayerWeight(player);
-            OnInventoryChanged?.Invoke(world.WorldId, player);
-        }
-        else if (!result.Success)
-        {
-            OnPlayerError?.Invoke(world.WorldId, player, result.ErrorMessage ?? "Cannot use item");
-        }
-
-        // Emit door_unlocked event so clients can update visuals
-        if (result.Success && !string.IsNullOrEmpty(result.UnlockedConnectionId))
-        {
-            AddCombatEvent(world.WorldId, new CombatEvent
+            else if (!result.Success)
             {
-                EventType = "door_unlocked",
-                SourceId = player.PlayerId,
-                TargetId = result.UnlockedConnectionId,
-                Position = player.Position,
-                RoomId = player.CurrentRoomId,
-                AbilityId = result.UnlockedConnectionId
-            });
-        }
+                OnPlayerError?.Invoke(world.WorldId, player, result.ErrorMessage ?? "Cannot use item");
+            }
 
-        _logger.LogInformation("Player {PlayerName} used item {ItemName}: {Success}",
-            player.PlayerName, item.ItemName, result.Success ? "Success" : $"Failed - {result.ErrorMessage}");
+            // Emit door_unlocked event so clients can update visuals
+            if (result.Success && !string.IsNullOrEmpty(result.UnlockedConnectionId))
+            {
+                AddCombatEvent(world.WorldId, new CombatEvent
+                {
+                    EventType = "door_unlocked",
+                    SourceId = player.PlayerId,
+                    TargetId = result.UnlockedConnectionId,
+                    Position = player.Position,
+                    RoomId = player.CurrentRoomId,
+                    AbilityId = result.UnlockedConnectionId
+                });
+            }
+
+            _logger.LogInformation("Player {PlayerName} used item {ItemName}: {Success}",
+                player.PlayerName, item.ItemName, result.Success ? "Success" : $"Failed - {result.ErrorMessage}");
+        }
     }
 
     private static void RecalculatePlayerWeight(RealTimePlayer player)
@@ -1265,10 +1531,20 @@ public class RealTimeGameEngine
         player.CurrentWeight = MazeWars.GameServer.Services.Loot.LootSystem.CalculatePlayerWeight(player);
     }
 
-    private async void ProcessAttack(RealTimePlayer attacker, string targetEntityId = "")
+    private void ProcessAttack(RealTimePlayer attacker, string targetEntityId = "")
     {
         try
         {
+            ProcessAttackAsync(attacker, targetEntityId).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing attack for {PlayerName}", attacker.PlayerName);
+        }
+    }
+
+    private async Task ProcessAttackAsync(RealTimePlayer attacker, string targetEntityId = "")
+    {
             var world = FindWorldByPlayer(attacker.PlayerId);
             if (world == null) return;
 
@@ -1326,20 +1602,27 @@ public class RealTimeGameEngine
                 _logger.LogDebug("Attack failed for {PlayerName}: {Error}",
                     attacker.PlayerName, fallbackResult.ErrorMessage);
             }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error processing attack for {PlayerName}", attacker.PlayerName);
-        }
     }
 
-    private async void ProcessAbility(RealTimePlayer player, string abilityType, Vector2 target)
+    private void ProcessAbility(RealTimePlayer player, string abilityType, Vector2 target)
     {
         try
         {
+            ProcessAbilityAsync(player, abilityType, target).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing ability {AbilityType} for {PlayerName}", abilityType, player.PlayerName);
+        }
+    }
+
+    private async Task ProcessAbilityAsync(RealTimePlayer player, string abilityType, Vector2 target)
+    {
             // Pre-validation: player must be alive and not stunned
             if (!player.IsAlive) return;
-            if (player.StatusEffects.Any(e => e.EffectType == "stun")) return;
+            bool isStunned;
+            lock (player.StatusEffectsLock) { isStunned = player.StatusEffects.Any(e => e.EffectType == "stun"); }
+            if (isStunned) return;
 
             var world = FindWorldByPlayer(player.PlayerId);
             if (world == null) return;
@@ -1360,11 +1643,6 @@ public class RealTimeGameEngine
                 _logger.LogDebug("Ability {AbilityType} failed for {PlayerName}: {Error}",
                     abilityType, player.PlayerName, result.ErrorMessage);
             }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error processing ability {AbilityType} for {PlayerName}", abilityType, player.PlayerName);
-        }
     }
 
     private void ProcessExtraction(RealTimePlayer player, ExtractionMessage extraction)
@@ -1378,7 +1656,7 @@ public class RealTimeGameEngine
         {
             case "start":
                 var distance = GameMathUtils.Distance(player.Position, extractionPoint.Position);
-                if (distance <= 5.0f && extractionPoint.IsActive)
+                if (distance <= 3.0f && extractionPoint.IsActive)
                 {
                     StartPlayerExtraction(world, player, extractionPoint);
                 }
@@ -1507,8 +1785,8 @@ public class RealTimeGameEngine
         // Pick up the soul
         player.CarryingSoulOfPlayerId = targetPlayerId;
 
-        // Apply 20% speed penalty
-        player.MovementSpeedModifier *= 0.8f;
+        // Apply 20% speed penalty (non-stacking: reset to base + equipment bonus first)
+        player.MovementSpeedModifier = (1f + player.EquipmentSpeedBonus) * 0.8f;
 
         _logger.LogInformation("Player {Carrier} picked up soul of {Dead}",
             player.PlayerName, deadAlly.PlayerName);
@@ -1568,6 +1846,13 @@ public class RealTimeGameEngine
         if (!altar.IsActive)
         {
             OnPlayerError?.Invoke(world.WorldId, player, "Altar is inactive");
+            return;
+        }
+
+        // Block revival in corrupted rooms
+        if (world.CorruptedRooms.Contains(altar.RoomId))
+        {
+            OnPlayerError?.Invoke(world.WorldId, player, "Cannot revive in a corrupted room");
             return;
         }
 
@@ -1632,6 +1917,12 @@ public class RealTimeGameEngine
             return;
         }
 
+        if (door.ChannelingPlayerId != null && door.ChannelingPlayerId != player.PlayerId)
+        {
+            OnPlayerError?.Invoke(world.WorldId, player, "Door is already being interacted with");
+            return;
+        }
+
         if (player.ChannelingAbility != null)
         {
             OnPlayerError?.Invoke(world.WorldId, player, "Already channeling");
@@ -1675,13 +1966,14 @@ public class RealTimeGameEngine
         player.IsMoving = false;
         player.MoveTarget = null;
         player.IsPathing = false;
+        player.Velocity = Vector2.Zero;
 
         // Also track on the door itself
         door.ChannelingPlayerId = player.PlayerId;
         door.ChannelingStartTime = DateTime.UtcNow;
 
         _logger.LogInformation("Player {PlayerName} started channeling to {Action} door {DoorId} ({Duration}s)",
-            player.PlayerName, action, doorId, door.ChannelingDuration);
+            player.PlayerName, action, doorId, channelingTime);
 
         AddCombatEvent(world.WorldId, new CombatEvent
         {
@@ -1726,36 +2018,10 @@ public class RealTimeGameEngine
     }
 
     /// <summary>
-    /// Server cleanup: silently close abandoned doors after 90s when no players are in adjacent rooms.
-    /// This is NOT gameplay auto-close — open doors are information in PvP.
+    /// No auto-close — Dark and Darker style: doors stay where players leave them.
     /// </summary>
     private void UpdateDoors(GameWorld world)
     {
-        foreach (var door in world.Doors.Values)
-        {
-            if (!door.IsOpen) continue;
-
-            var timeSinceOpened = (DateTime.UtcNow - door.OpenedAt).TotalSeconds;
-            if (timeSinceOpened < door.AutoCloseSeconds) continue;
-
-            // Only cleanup if no player is in either connected room or their adjacent rooms
-            var doorRooms = new HashSet<string> { door.RoomIdA, door.RoomIdB };
-
-            // Expand to adjacent rooms of door rooms (AOI range)
-            if (world.Rooms.TryGetValue(door.RoomIdA, out var rA))
-                foreach (var adj in rA.Connections) doorRooms.Add(adj);
-            if (world.Rooms.TryGetValue(door.RoomIdB, out var rB))
-                foreach (var adj in rB.Connections) doorRooms.Add(adj);
-
-            var anyPlayerInArea = world.Players.Values
-                .Any(p => p.IsAlive && doorRooms.Contains(p.CurrentRoomId));
-
-            if (anyPlayerInArea) continue;
-
-            // Silent cleanup — no combat event (no one can see it anyway)
-            door.IsOpen = false;
-            _logger.LogDebug("Door {DoorId} cleanup-closed (abandoned for {Seconds}s)", door.DoorId, (int)timeSinceOpened);
-        }
     }
 
     private void CheckRoomCompletion(GameWorld world)
@@ -1765,7 +2031,7 @@ public class RealTimeGameEngine
             if (room.IsCompleted) continue;
 
             // Extraction/spawn rooms have no mobs by design — skip to avoid free XP on enter
-            if (room.RoomType is "empty" or "extraction_zone" or "spawn") continue;
+            if (room.RoomType is "empty" or "spawn") continue;
 
             // Check if any alive player is in this room
             string? firstTeamId = null;
@@ -1942,6 +2208,23 @@ public class RealTimeGameEngine
         {
             _logger.LogInformation("Team {TeamId} has been eliminated in world {WorldId}",
                 teamId, world.WorldId);
+
+            // Check if only one team remains alive → set winning team
+            if (world.InitialTeamCount >= 2 && string.IsNullOrEmpty(world.WinningTeam))
+            {
+                var aliveTeams = world.Players.Values
+                    .Where(p => p.IsAlive)
+                    .Select(p => p.TeamId)
+                    .Distinct()
+                    .ToList();
+
+                if (aliveTeams.Count == 1)
+                {
+                    world.WinningTeam = aliveTeams[0];
+                    _logger.LogInformation("Team {WinningTeam} is the last team standing in world {WorldId}",
+                        world.WinningTeam, world.WorldId);
+                }
+            }
         }
     }
 
@@ -1960,28 +2243,12 @@ public class RealTimeGameEngine
             return;
         }
 
-        // Condition 2: All remaining players are dead
+        // Condition 2: All remaining players are dead (final corruption wave kills everyone)
         var anyAlive = world.Players.Values.Any(p => p.IsAlive);
         if (!anyAlive && world.Players.Count > 0)
         {
             EndMatch(world, "all_dead");
             return;
-        }
-
-        // Condition 3: Corruption wave 3 + 60s elapsed → force extract alive players
-        if (world.CorruptionWave >= 3)
-        {
-            var timeSinceLastWave = DateTime.UtcNow - world.NextWaveTime;
-            if (timeSinceLastWave.TotalSeconds >= 60)
-            {
-                // Force-extract all alive players
-                var alivePlayers = world.Players.Values.Where(p => p.IsAlive).ToList();
-                foreach (var player in alivePlayers)
-                {
-                    ForceExtractPlayer(world, player);
-                }
-                EndMatch(world, "time_limit");
-            }
         }
     }
 
@@ -1993,6 +2260,10 @@ public class RealTimeGameEngine
 
         _logger.LogInformation("Match ended in world {WorldId}: {Reason} ({PlayerCount} remaining players)",
             world.WorldId, reason, world.Players.Count);
+
+        // Update challenge progress for match participation
+        foreach (var p in world.Players.Values)
+            _challengeService.UpdateProgress(p.PlayerName, "matches_played", 1);
 
         // Send match_summary to ALL remaining players (dead players get partial XP)
         foreach (var player in world.Players.Values.ToList())
@@ -2017,7 +2288,10 @@ public class RealTimeGameEngine
                 GameDurationSeconds = (DateTime.UtcNow - world.CreatedAt).TotalSeconds,
                 MobKills = player.MobKills,
                 ContainersLooted = player.ContainersLooted,
-                GoldEarned = goldEarned
+                GoldEarned = goldEarned,
+                AccountTotalXP = player.AccountTotalXP + partialXp,
+                AccountLevel = PlayerRepository.CalculateLevel(player.AccountTotalXP + partialXp),
+                AccountGold = player.AccountGold + goldEarned
             };
 
             OnPlayerExtracted?.Invoke(world.WorldId, player, summary);
@@ -2029,7 +2303,7 @@ public class RealTimeGameEngine
             {
                 try
                 {
-                    await _playerRepository.UpdateCareerStats(player.PlayerName,
+                    await _playerRepository.UpdateCareerStats(player.PlayerName, player.CharacterName,
                         player.Kills, player.Deaths, player.DamageDealt, player.HealingDone,
                         extracted: false, xpGained: xp, goldEarned: gold);
                     await _playerRepository.RecordMatch(player.PlayerName, new Data.Models.MatchRecord
@@ -2093,8 +2367,9 @@ public class RealTimeGameEngine
         var item = stash.FirstOrDefault(i => i.LootId == lootId);
         if (item == null) return false;
 
-        // Remove from stash
-        _stashService.RemoveItem(player.PlayerName, lootId);
+        // Atomically remove from stash — only one concurrent caller can succeed
+        if (!_stashService.RemoveItem(player.PlayerName, lootId))
+            return false;
 
         // Add to player inventory
         lock (player.InventoryLock)
@@ -2186,7 +2461,16 @@ public class RealTimeGameEngine
 
                 if (elapsedTime >= extraction.ExtractionTimeSeconds)
                 {
-                    CompletePlayerExtraction(world, playerId, extraction);
+                    // Final alive check — prevent dead players from completing extraction
+                    if (world.Players.TryGetValue(playerId, out var extractingPlayer) &&
+                        extractingPlayer.IsAlive)
+                    {
+                        CompletePlayerExtraction(world, playerId, extraction);
+                    }
+                    else
+                    {
+                        CancelPlayerExtraction(world, playerId, extraction);
+                    }
                     playersToRemove.Add(playerId);
                 }
                 else
@@ -2252,25 +2536,45 @@ public class RealTimeGameEngine
 
         var extractedValue = CalculateExtractionValue(player);
 
+        // ── Snapshot inventory under lock to prevent TOCTOU ──
+        List<LootItem> inventorySnapshot;
+        lock (player.InventoryLock)
+        {
+            inventorySnapshot = new List<LootItem>(player.Inventory);
+            player.Inventory.Clear();
+        }
+
         // ── Calculate comprehensive XP (Item 2) ──
         var mobKillsXp = player.ExperiencePoints; // Already accumulated in HandleMobDeath
         var playerKillsXp = player.Kills * 200;
         var containersXp = player.ContainersLooted * 50;
-        var extractionBonusXp = player.Inventory.Sum(item => item.Rarity * 100);
+        var extractionBonusXp = inventorySnapshot.Sum(item => item.Rarity * 100);
         var extractionValueXp = extractedValue / 10;
         var totalMatchXp = playerKillsXp + containersXp + extractionBonusXp + extractionValueXp;
         // Note: mobKillsXp was already added to ExperiencePoints during the match
 
         // ── Separate valuables from equipment (Item 3) ──
-        var valuables = player.Inventory.Where(i => i.ItemType == "valuable").ToList();
-        var nonValuables = player.Inventory.Where(i => i.ItemType != "valuable").ToList();
-        var goldEarned = player.Inventory.Sum(i => i.Value); // All items contribute to gold
+        var valuables = inventorySnapshot.Where(i => i.ItemType == "valuable").ToList();
+        var nonValuables = inventorySnapshot.Where(i => i.ItemType != "valuable").ToList();
+        var goldEarned = inventorySnapshot.Sum(i => i.Value); // All items contribute to gold
+
+        var inventoryCount = inventorySnapshot.Count;
 
         // Stash non-valuable items for cross-match persistence
         var stashedCount = _stashService.StashItems(player.PlayerName, nonValuables);
+        var droppedCount = nonValuables.Count - stashedCount;
+        if (droppedCount > 0)
+        {
+            _logger.LogWarning("Player {PlayerName} stash overflow: {Dropped} items could not be stashed (stash full)",
+                player.PlayerName, droppedCount);
+        }
+
+        // Challenge progress
+        _challengeService.UpdateProgress(player.PlayerName, "extractions", 1);
+        _challengeService.UpdateProgress(player.PlayerName, "items_looted", inventoryCount);
 
         _logger.LogInformation("Player {PlayerName} extracted: {ItemCount} items, {Value} value, {Gold} gold, {Valuables} valuables sold ({Stashed} stashed)",
-            player.PlayerName, player.Inventory.Count, extractedValue, goldEarned, valuables.Count, stashedCount);
+            player.PlayerName, inventoryCount, extractedValue, goldEarned, valuables.Count, stashedCount);
 
         // Send match summary before removing player
         var summary = new MatchSummaryData
@@ -2283,23 +2587,32 @@ public class RealTimeGameEngine
             Deaths = player.Deaths,
             DamageDealt = player.DamageDealt,
             HealingDone = player.HealingDone,
-            ItemsExtracted = player.Inventory.Count,
+            ItemsExtracted = inventoryCount,
             ExtractionValue = extractedValue,
             XpGained = totalMatchXp,
             FinalLevel = player.Level,
             GameDurationSeconds = (DateTime.UtcNow - world.CreatedAt).TotalSeconds,
             MobKills = player.MobKills,
             ContainersLooted = player.ContainersLooted,
-            GoldEarned = goldEarned
+            GoldEarned = goldEarned,
+            AccountTotalXP = player.AccountTotalXP + totalMatchXp,
+            AccountLevel = PlayerRepository.CalculateLevel(player.AccountTotalXP + totalMatchXp),
+            AccountGold = player.AccountGold + goldEarned
         };
         OnPlayerExtracted?.Invoke(world.WorldId, player, summary);
+
+        // Apply gold in-memory immediately so it's visible even if DB persist fails
+        lock (player.InventoryLock)
+        {
+            player.AccountGold += goldEarned;
+        }
 
         // Persist career stats, XP, gold, and match record to database
         _ = Task.Run(async () =>
         {
             try
             {
-                await _playerRepository.UpdateCareerStats(player.PlayerName,
+                await _playerRepository.UpdateCareerStats(player.PlayerName, player.CharacterName,
                     player.Kills, player.Deaths, player.DamageDealt, player.HealingDone,
                     extracted: true, xpGained: totalMatchXp, goldEarned: goldEarned);
                 await _playerRepository.RecordMatch(player.PlayerName, new Data.Models.MatchRecord
@@ -2311,7 +2624,7 @@ public class RealTimeGameEngine
                     Deaths = player.Deaths,
                     DamageDealt = player.DamageDealt,
                     HealingDone = player.HealingDone,
-                    ItemsExtracted = player.Inventory.Count,
+                    ItemsExtracted = inventoryCount,
                     ExtractionValue = extractedValue,
                     XpGained = totalMatchXp,
                     GoldEarned = goldEarned
@@ -2319,11 +2632,19 @@ public class RealTimeGameEngine
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to persist match data for {Player}", player.PlayerName);
+                // Compensate: reverse the in-memory gold addition
+                lock (player.InventoryLock)
+                {
+                    player.AccountGold -= goldEarned;
+                }
+                _logger.LogError(ex, "Failed to persist match data for {Player}, reversed gold", player.PlayerName);
             }
         });
 
         world.Players.TryRemove(playerId, out _);
+
+        // Check if match should end (all players extracted or dead)
+        CheckMatchEnd(world);
     }
 
     private void CancelPlayerExtraction(GameWorld world, string playerId, ExtractionPoint extraction)
@@ -2378,7 +2699,7 @@ public class RealTimeGameEngine
 
         worldUpdate.AcknowledgedInputs = acknowledgedInputs;
         worldUpdate.ServerTime = (float)DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalSeconds;
-        worldUpdate.FrameNumber = _frameNumber;
+        worldUpdate.FrameNumber = (ulong)_frameNumber;
 
         // ⭐ PERF: Rent lists from pools (pre-sized for efficiency)
         var playerList = pools.PlayerStateLists.Rent();
@@ -2406,8 +2727,8 @@ public class RealTimeGameEngine
 
             playerList.Add(playerUpdate);
 
-            // ⭐ DELTA: Mark as sent to avoid resending unchanged state
-            p.MarkAsSent();
+            // NOTE: MarkAsSent is now managed exclusively by NetworkService
+            // to avoid race conditions with dual HasSignificantChange/MarkAsSent calls
         }
 
         // Create mob updates using pooled objects (only dirty mobs)
@@ -2535,16 +2856,16 @@ public class RealTimeGameEngine
 
     private void AddCombatEvent(string worldId, CombatEvent combatEvent)
     {
-        var bag = _recentCombatEvents.GetOrAdd(worldId, _ => new ConcurrentBag<CombatEvent>());
-        if (bag.Count < MaxEventsPerBag)
-            bag.Add(combatEvent);
+        var queue = _recentCombatEvents.GetOrAdd(worldId, _ => new ConcurrentQueue<CombatEvent>());
+        if (queue.Count < MaxEventsPerBag)
+            queue.Enqueue(combatEvent);
     }
 
     private void AddLootUpdate(string worldId, LootUpdate lootUpdate)
     {
-        var bag = _recentLootUpdates.GetOrAdd(worldId, _ => new ConcurrentBag<LootUpdate>());
-        if (bag.Count < MaxEventsPerBag)
-            bag.Add(lootUpdate);
+        var queue = _recentLootUpdates.GetOrAdd(worldId, _ => new ConcurrentQueue<LootUpdate>());
+        if (queue.Count < MaxEventsPerBag)
+            queue.Enqueue(lootUpdate);
     }
 
     private List<CombatEvent> GetAndClearRecentCombatEvents(string worldId)
@@ -2569,10 +2890,10 @@ public class RealTimeGameEngine
     // ⭐ REFACTORED: MATCHMAKING SYSTEM (now using LobbyManager)
     // =============================================
 
-    public string FindOrCreateWorld(string teamId, string gameMode = "trios")
+    public string FindOrCreateWorld(string teamId, string gameMode = "trios", string difficultyTier = "normal")
     {
-        // ⭐ REFACTORED: Delegate to LobbyManager with game mode
-        var lobbyId = _lobbyManager.FindOrCreateLobby(teamId, gameMode);
+        // ⭐ REFACTORED: Delegate to LobbyManager with game mode and difficulty
+        var lobbyId = _lobbyManager.FindOrCreateLobby(teamId, gameMode, difficultyTier);
 
         // Create lobby arena world if it doesn't exist yet
         if (_worldManager.GetWorld(lobbyId) == null && _lobbyManager.IsLobby(lobbyId))
@@ -2589,20 +2910,6 @@ public class RealTimeGameEngine
 
     public bool AddPlayerToWorld(string worldId, RealTimePlayer player)
     {
-        // Ensure player account exists in DB and load stash
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await _playerRepository.GetOrCreatePlayer(player.PlayerName);
-                await _stashService.LoadFromDatabase(player.PlayerName);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to load player data for {Player}", player.PlayerName);
-            }
-        });
-
         var existingWorld = _worldManager.GetWorld(worldId);
 
         // Handle lobby arena world: add to both WorldLobby and GameWorld
@@ -2610,6 +2917,12 @@ public class RealTimeGameEngine
         {
             if (!_lobbyManager.AddPlayerToLobby(worldId, player))
                 return false;
+
+            // If lobby auto-started (e.g. arena mode), the game world was created
+            // synchronously inside AddPlayerToLobby. Player is already positioned
+            // in the game world — don't overwrite with lobby spawn.
+            if (!_lobbyManager.IsLobby(worldId))
+                return true;
 
             player.Position = _worldManager.GetLobbySpawnPosition(player.TeamId);
             player.CurrentRoomId = _movementSystem.GetRoomIdByPosition(existingWorld, player.Position);
@@ -2666,6 +2979,28 @@ public class RealTimeGameEngine
             var gameMode = lobby.GameMode;
             _settings.GameModes.TryGetValue(gameMode, out var modeConfig);
 
+            // Apply difficulty multipliers on top of mode config
+            if (modeConfig != null && lobby.DifficultyTier != "normal")
+            {
+                var (healthMult, damageMult, lootMult) = lobby.DifficultyTier switch
+                {
+                    "hard" => (1.5f, 1.4f, 1.3f),
+                    "nightmare" => (2.2f, 1.8f, 1.6f),
+                    _ => (1.0f, 1.0f, 1.0f)
+                };
+                modeConfig = new GameModeConfig
+                {
+                    MaxTeamSize = modeConfig.MaxTeamSize,
+                    GridSizeX = modeConfig.GridSizeX,
+                    GridSizeY = modeConfig.GridSizeY,
+                    MobsPerRoom = modeConfig.MobsPerRoom + (lobby.DifficultyTier == "nightmare" ? 1 : 0),
+                    MobHealthMultiplier = modeConfig.MobHealthMultiplier * healthMult,
+                    MobDamageMultiplier = modeConfig.MobDamageMultiplier * damageMult,
+                    MaxPlayersPerLobby = modeConfig.MaxPlayersPerLobby,
+                    InitialLootCount = (int)(modeConfig.InitialLootCount * lootMult)
+                };
+            }
+
             _logger.LogInformation("Creating game world from lobby {LobbyId} with {PlayerCount} players (mode: {GameMode})",
                 lobby.LobbyId, lobby.TotalPlayers, gameMode);
 
@@ -2688,6 +3023,7 @@ public class RealTimeGameEngine
 
             // ⭐ REFACTORED: Use WorldManager to create world with mode config
             var world = _worldManager.CreateWorld(lobby.LobbyId, playersDict, gameMode, modeConfig);
+            world.DifficultyTier = lobby.DifficultyTier;
 
             // Set player room IDs and reset movement/level state after world creation
             foreach (var player in world.Players.Values)
@@ -2723,8 +3059,12 @@ public class RealTimeGameEngine
             world.InitialTeamCount = world.Players.Values.Select(p => p.TeamId).Distinct().Count();
             world.GameStartedAt = DateTime.UtcNow;
 
-            // ⭐ Spawn initial mobs
-            var spawnedMobs = _mobAISystem.SpawnInitialMobs(world);
+            // ⭐ Spawn initial mobs (skip for arena mode)
+            var spawnedMobs = new List<Mob>();
+            if (world.GameMode != "arena")
+            {
+                spawnedMobs = _mobAISystem.SpawnInitialMobs(world);
+            }
 
             // Queue initial container updates so clients receive them on first frame
             foreach (var container in world.LootContainers.Values)
@@ -2869,6 +3209,11 @@ public class RealTimeGameEngine
         return _lobbyManager.IsLobby(worldId);
     }
 
+    public string GetWorldDifficulty(string worldId)
+    {
+        return _worldManager.GetWorld(worldId)?.DifficultyTier ?? "normal";
+    }
+
     /// <summary>
     /// ⭐ REFACTORED: Get lobby info (delegated to LobbyManager).
     /// </summary>
@@ -2999,6 +3344,14 @@ public class RealTimeGameEngine
         }).ToList();
 
         return diagnostics;
+    }
+
+    /// <summary>
+    /// Reset input buffer sequence tracking for a reconnecting player.
+    /// </summary>
+    public void ResetPlayerInputBuffer(string playerId)
+    {
+        _inputProcessor.ResetPlayerInputBuffer(playerId);
     }
 
     public void ResetPlayerMovementSuspicion(string playerId)

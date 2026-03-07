@@ -49,7 +49,7 @@ public class EquipmentSystem : IEquipmentSystem
                 if (player.Equipment.TryGetValue(EquipmentSlot.Offhand, out var offhand))
                 {
                     player.Inventory.Add(offhand);
-                    player.Equipment.Remove(EquipmentSlot.Offhand);
+                    player.Equipment.TryRemove(EquipmentSlot.Offhand, out _);
                 }
             }
             else if (slot == EquipmentSlot.Offhand)
@@ -60,7 +60,7 @@ public class EquipmentSystem : IEquipmentSystem
                     if (weaponDef?.IsTwoHanded == true)
                     {
                         player.Inventory.Add(weapon);
-                        player.Equipment.Remove(EquipmentSlot.Weapon);
+                        player.Equipment.TryRemove(EquipmentSlot.Weapon, out _);
                     }
                 }
             }
@@ -69,7 +69,7 @@ public class EquipmentSystem : IEquipmentSystem
             if (player.Equipment.TryGetValue(slot, out var currentItem))
             {
                 player.Inventory.Add(currentItem);
-                player.Equipment.Remove(slot);
+                player.Equipment.TryRemove(slot, out _);
             }
 
             // Move from inventory to equipment
@@ -93,7 +93,7 @@ public class EquipmentSystem : IEquipmentSystem
             if (!player.Equipment.TryGetValue(slot, out var item))
                 return EquipResult.Fail("Nothing equipped in that slot");
 
-            player.Equipment.Remove(slot);
+            player.Equipment.TryRemove(slot, out _);
             player.Inventory.Add(item);
 
             RecalculateEquipmentStats(player);
@@ -179,6 +179,24 @@ public class EquipmentSystem : IEquipmentSystem
             atkSpeedBonus += equipDef.AttackSpeedBonus;
             critChance += equipDef.CritChance;
             hpRegen += equipDef.HealthRegenPerSecond;
+
+            // Apply affix stats from item (stored as percentage * 100 in Stats dict)
+            foreach (var (statKey, statVal) in lootItem.Stats)
+            {
+                var pct = statVal / 100f;
+                switch (statKey)
+                {
+                    case "bonus_damage_pct": bonusDmgPct += pct; break;
+                    case "bonus_healing_pct": bonusHealPct += pct; break;
+                    case "bonus_health": bonusHealth += statVal; break;
+                    case "bonus_mana": bonusMana += statVal; break;
+                    case "bonus_speed_pct": speedBonus += pct; break;
+                    case "bonus_dr": dmgReduction += pct; break;
+                    case "bonus_cdr": cdr += pct; break;
+                    case "bonus_crit": critChance += pct; break;
+                    case "bonus_atk_speed": atkSpeedBonus += pct; break;
+                }
+            }
         }
 
         // Adjust max HP/MP (remove old bonus, add new)
@@ -196,16 +214,23 @@ public class EquipmentSystem : IEquipmentSystem
         player.EquipmentSpeedBonus = speedBonus;
         player.EquipmentManaRegen = manaRegen;
 
-        // Store direct bonus fields
-        player.BonusDamagePercent = bonusDmgPct;
-        player.BonusHealingPercent = bonusHealPct;
-        player.CooldownReduction = cdr;
-        player.AttackSpeedBonus = atkSpeedBonus;
-        player.CritChance = critChance;
-        player.HealthRegenPerSecond = hpRegen;
+        // Store direct bonus fields (with caps to prevent exploits)
+        player.BonusDamagePercent = Math.Clamp(bonusDmgPct, 0f, 1.0f);    // Cap: +100% bonus damage
+        player.BonusHealingPercent = Math.Clamp(bonusHealPct, 0f, 0.75f);  // Cap: +75% bonus healing
+        player.CooldownReduction = Math.Clamp(cdr, 0f, 0.50f);         // Cap: 50% CDR max
+        player.AttackSpeedBonus = Math.Clamp(atkSpeedBonus, 0f, 1.0f);  // Cap: +100% attack speed
+        player.CritChance = Math.Clamp(critChance, 0f, 0.75f);         // Cap: 75% crit
+        player.HealthRegenPerSecond = Math.Min(hpRegen, 10f);
 
         player.MovementSpeedModifier = 1f + speedBonus;
-        player.DamageReduction = dmgReduction;
+        player.DamageReduction = Math.Clamp(dmgReduction, 0f, 0.75f);   // Cap: 75% DR max
+
+        // Apply class HP modifier: Assassin gets -15% HP (glass cannon penalty)
+        if (player.PlayerClass == "assassin")
+        {
+            player.MaxHealth = (int)(player.MaxHealth * 0.85f);
+            player.Health = Math.Min(player.Health, player.MaxHealth);
+        }
     }
 
     public void EquipStartingGear(RealTimePlayer player)

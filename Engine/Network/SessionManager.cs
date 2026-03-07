@@ -11,6 +11,7 @@ namespace MazeWars.GameServer.Engine.Network;
 public class SessionManager
 {
     private readonly ConcurrentDictionary<string, PlayerSession> _sessions = new();
+    private readonly object _reconnectLock = new();
     private readonly ILogger<SessionManager> _logger;
     private readonly TimeSpan _sessionTTL;
 
@@ -71,6 +72,22 @@ public class SessionManager
             return;
         }
 
+        // Snapshot inventory under lock to prevent cross-thread enumeration issues
+        List<LootItem> inventorySnapshot;
+        lock (player.InventoryLock)
+        {
+            inventorySnapshot = player.Inventory.Select(item => new LootItem
+            {
+                ItemId = item.ItemId,
+                ItemName = item.ItemName,
+                ItemType = item.ItemType,
+                Rarity = item.Rarity,
+                Stats = new Dictionary<string, int>(item.Stats),
+                Properties = new Dictionary<string, object>(item.Properties),
+                Value = item.Value
+            }).ToList();
+        }
+
         // Serialize player state for reconnection
         session.PlayerState = new SavedPlayerState
         {
@@ -99,17 +116,8 @@ public class SessionManager
             Level = player.Level,
             ExperiencePoints = player.ExperiencePoints,
 
-            // Inventory (deep copy with snapshot to avoid cross-thread enumeration issues)
-            Inventory = SnapshotList(player.Inventory).Select(item => new LootItem
-            {
-                ItemId = item.ItemId,
-                ItemName = item.ItemName,
-                ItemType = item.ItemType,
-                Rarity = item.Rarity,
-                Stats = new Dictionary<string, int>(item.Stats),
-                Properties = new Dictionary<string, object>(item.Properties),
-                Value = item.Value
-            }).ToList(),
+            // Inventory (deep copy under lock to prevent cross-thread enumeration issues)
+            Inventory = inventorySnapshot,
 
             // Equipment (deep copy)
             Equipment = new Dictionary<EquipmentSlot, LootItem>(
@@ -155,6 +163,9 @@ public class SessionManager
     /// <summary>
     /// Validates reconnection attempt and returns saved session if valid.
     /// </summary>
+    /// <summary>
+    /// Atomically validates and activates a reconnection to prevent duplicate session exploits.
+    /// </summary>
     public (bool Success, PlayerSession? Session, string ErrorMessage) ValidateReconnection(string sessionToken)
     {
         if (string.IsNullOrEmpty(sessionToken))
@@ -168,49 +179,51 @@ public class SessionManager
             return (false, null, "Invalid session token");
         }
 
-        // Check if session expired
-        if (DateTime.UtcNow > session.ExpiresAt)
+        // Lock to make validate+activate atomic (prevents duplicate reconnection race)
+        lock (_reconnectLock)
         {
-            _logger.LogWarning("Reconnection attempt with expired session {SessionToken}. Expired at {ExpiresAt}",
-                sessionToken, session.ExpiresAt);
+            // Check if session expired
+            if (DateTime.UtcNow > session.ExpiresAt)
+            {
+                _logger.LogWarning("Reconnection attempt with expired session {SessionToken}. Expired at {ExpiresAt}",
+                    sessionToken, session.ExpiresAt);
 
-            _sessions.TryRemove(sessionToken, out _);
-            return (false, null, "Session expired. Please create a new game.");
+                _sessions.TryRemove(sessionToken, out _);
+                return (false, null, "Session expired. Please create a new game.");
+            }
+
+            // Check if player already reconnected (session is active)
+            if (session.IsActive)
+            {
+                _logger.LogWarning("Reconnection attempt with already active session {SessionToken}", sessionToken);
+                return (false, null, "Session is already active");
+            }
+
+            // Check if we have saved state (can't reconnect without state)
+            if (session.PlayerState == null)
+            {
+                _logger.LogWarning("Reconnection attempt but no saved state for session {SessionToken}", sessionToken);
+                return (false, null, "No saved state available");
+            }
+
+            // Activate immediately to prevent race conditions
+            session.IsActive = true;
+            session.LastActivity = DateTime.UtcNow;
+
+            _logger.LogInformation("Validated and activated reconnection for session {SessionToken}, player {PlayerName}",
+                sessionToken, session.PlayerName);
+
+            return (true, session, string.Empty);
         }
-
-        // Check if player already reconnected (session is active)
-        if (session.IsActive)
-        {
-            _logger.LogWarning("Reconnection attempt with already active session {SessionToken}", sessionToken);
-            return (false, null, "Session is already active");
-        }
-
-        // Check if we have saved state (can't reconnect without state)
-        if (session.PlayerState == null)
-        {
-            _logger.LogWarning("Reconnection attempt but no saved state for session {SessionToken}", sessionToken);
-            return (false, null, "No saved state available");
-        }
-
-        _logger.LogInformation("Validated reconnection for session {SessionToken}, player {PlayerName}",
-            sessionToken, session.PlayerName);
-
-        return (true, session, string.Empty);
     }
 
     /// <summary>
     /// Marks session as active after successful reconnection.
+    /// Now a no-op since ValidateReconnection activates atomically. Kept for API compatibility.
     /// </summary>
     public void ActivateSession(string sessionToken)
     {
-        if (_sessions.TryGetValue(sessionToken, out var session))
-        {
-            session.IsActive = true;
-            session.LastActivity = DateTime.UtcNow;
-
-            _logger.LogInformation("Activated session {SessionToken} for player {PlayerName}",
-                sessionToken, session.PlayerName);
-        }
+        // Activation now happens atomically in ValidateReconnection
     }
 
     /// <summary>

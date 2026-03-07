@@ -131,6 +131,8 @@ public class ClientRateLimit
             "server_pong" => 240,
             "heartbeat" => 120,
             "message_ack" => 240,
+            "connect" => 5,
+            "reconnect" => 10,
             _ => 60
         };
     }

@@ -29,6 +29,9 @@ public class AbilityDefinition
     // Attack speed for basic attacks (slot 0). 0 = use global default
     public int AttackSpeedMs { get; set; }
 
+    // Multi-hit (combo abilities deal multiple damage instances per use)
+    public int HitCount { get; set; } = 1;
+
     // Movement (for dash/charge)
     public float DashDistance { get; set; }
     public float DashSpeed { get; set; }

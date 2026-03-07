@@ -8,8 +8,6 @@ public class RoomDoor
     public string RoomIdB { get; set; } = string.Empty;
     public bool IsOpen { get; set; } = false;
     public DateTime OpenedAt { get; set; }
-    /// <summary>Server cleanup timer: silently close abandoned doors (not gameplay auto-close)</summary>
-    public float AutoCloseSeconds { get; set; } = 90f;
     /// <summary>If true, requires a key (handled by LockedDoor system)</summary>
     public bool IsLocked { get; set; } = false;
     /// <summary>Player who is currently channeling to open this door</summary>

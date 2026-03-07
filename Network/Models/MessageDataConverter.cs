@@ -24,9 +24,11 @@ public static class MessageDataConverter
             return new ClientConnectData
             {
                 PlayerName = array[0]?.ToString() ?? string.Empty,
-                PlayerClass = array[1]?.ToString() ?? "scout",
+                CharacterName = array[1]?.ToString() ?? string.Empty,
                 TeamId = array[2]?.ToString() ?? string.Empty,
-                AuthToken = array[3]?.ToString() ?? string.Empty
+                AuthToken = array[3]?.ToString() ?? string.Empty,
+                GameMode = array.Length > 4 ? (array[4]?.ToString() ?? "trios") : "trios",
+                DifficultyTier = array.Length > 5 ? (array[5]?.ToString() ?? "normal") : "normal"
             } as T;
         }
 
@@ -166,6 +168,70 @@ public static class MessageDataConverter
             return new DoorInteractMessage
             {
                 DoorId = array[0]?.ToString() ?? string.Empty
+            } as T;
+        }
+
+        if (type == typeof(EquipFromStashMessage) && array.Length >= 1)
+        {
+            return new EquipFromStashMessage
+            {
+                LootId = array[0]?.ToString() ?? string.Empty
+            } as T;
+        }
+
+        if (type == typeof(BuyFromVendorMessage) && array.Length >= 1)
+        {
+            return new BuyFromVendorMessage
+            {
+                EquipmentId = array[0]?.ToString() ?? string.Empty
+            } as T;
+        }
+
+        if (type == typeof(SellToVendorMessage) && array.Length >= 1)
+        {
+            return new SellToVendorMessage
+            {
+                LootId = array[0]?.ToString() ?? string.Empty
+            } as T;
+        }
+
+        if (type == typeof(LeaderboardRequestMessage) && array.Length >= 1)
+        {
+            return new LeaderboardRequestMessage
+            {
+                SortBy = array[0]?.ToString() ?? "level"
+            } as T;
+        }
+
+        if (type == typeof(InsureItemMessage) && array.Length >= 1)
+        {
+            return new InsureItemMessage
+            {
+                LootId = array[0]?.ToString() ?? string.Empty
+            } as T;
+        }
+
+        if (type == typeof(ClaimChallengeMessage) && array.Length >= 1)
+        {
+            return new ClaimChallengeMessage
+            {
+                ChallengeId = array[0]?.ToString() ?? string.Empty
+            } as T;
+        }
+
+        if (type == typeof(PickupSoulMessage) && array.Length >= 1)
+        {
+            return new PickupSoulMessage
+            {
+                TargetPlayerId = array[0]?.ToString() ?? string.Empty
+            } as T;
+        }
+
+        if (type == typeof(AltarReviveMessage) && array.Length >= 1)
+        {
+            return new AltarReviveMessage
+            {
+                AltarId = array[0]?.ToString() ?? string.Empty
             } as T;
         }
 
